@@ -1,31 +1,52 @@
-# Project Andromeda for GTM — v5.1 (modernised scaffold)
+# LayerLens — GTM Companion Extension
 
-Vite + TypeScript + MV3 (via `@crxjs/vite-plugin`). Internal distribution (unpacked).
+Chrome extension (Manifest V3) that adds quality-of-life improvements to the Google Tag Manager web UI and lets you inspect the dataLayer on any website.
 
-## Commands
-- `npm run dev` — dev server with HMR (load `dist/` unpacked while running)
-- `npm run build` — type-check + production build into `dist/`
-- `npm run typecheck` — types only
+## Features
 
-## Load unpacked
-1. `npm run build`
-2. chrome://extensions → Developer mode → Load unpacked → select `dist/`
+- **Type filter chips** — filter tags / triggers / variables / clients by type with one click
+- **Copy row** — duplicate any tag, trigger, variable or client (web & server-side containers)
+- **Variable type labels** — human-readable labels for GTM variable codes
+- **Block accidental navigation** — warns before leaving a GTM workspace with unsaved changes
+- **dataLayer inspector** — view, inspect and export all dataLayer pushes on any page
+  - Newest push shown at top
+  - Live mode for real-time monitoring
+  - One-click copy of any push as `dataLayer.push(…)` code
+  - Export all pushes as a JSON file
+
+## Install (unpacked — no Chrome Web Store)
+
+1. Download **`layerlens.zip`** from the [latest Release](https://github.com/CreativeMetrics/layerlens/releases/latest)
+2. Unzip it — you'll get a `dist/` folder
+3. Open Chrome → `chrome://extensions` → enable **Developer mode** (top-right toggle)
+4. Click **Load unpacked** → select the `dist/` folder
+5. The LayerLens icon appears in your toolbar
+
+## Build from source
+
+```bash
+npm install
+npm run build          # type-check + production build → dist/
+npm run dev            # dev server with HMR
+```
+
+Requires Node 18+.
 
 ## Architecture
-- `src/manifest.ts` — typed manifest (source of truth)
-- `src/background/` — MV3 service worker
-- `src/content/` — content scripts (inject page-world scripts, relay messages)
-- `src/injected/` — PAGE-world scripts (GTM internals / dataLayer access)
-- `src/popup/` — extension popup
-- `src/lib/` — foundation:
-  - `gtm-angular.ts` — guarded access to GTM's Angular internals
-  - `gtm-selectors.ts` — single source of truth for GTM UI selectors (with fallbacks)
-  - `filters-schema.ts` — typed filters config + validation + new type-based model
-  - `storage.ts` / `messaging.ts` — typed wrappers
-  - `dom.ts` — minimal jQuery replacement
-- `src/types/` — `gtm.d.ts` (GTM internals contract), `messages.ts` (message protocol)
 
-## Migration status
-Scaffold ports: background, block-page-change, datalayer-checker (incl. page script).
-Next phase: full QoL port (filters redesign, bulk actions, rename, pause, inject,
-preview tweaks), de-jQuery of the popup, FontAwesome → inline SVG, UI restyle.
+```
+src/
+├── background/        MV3 service worker
+├── content/           Content scripts (message relay, page-world injection)
+├── injected/          Page-world scripts (GTM Angular internals, dataLayer access)
+├── popup/             Extension popup (HTML + TS + CSS)
+├── lib/
+│   ├── gtm-angular.ts      Guarded access to GTM's Angular internals
+│   ├── gtm-selectors.ts    Single source of truth for GTM UI selectors
+│   ├── filters-schema.ts   Typed filter config + validation
+│   ├── storage.ts          Typed chrome.storage wrapper
+│   └── messaging.ts        Typed message protocol
+└── types/
+    ├── gtm.d.ts            GTM internals contract
+    └── messages.ts         Extension message types
+```
