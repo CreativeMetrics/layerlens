@@ -1,0 +1,1 @@
+import{g as t}from"./storage-DQyFDKmw.js";let n=!1;const a=e=>{e.preventDefault(),e.returnValue=""};function o(e){e&&!n?(window.addEventListener("beforeunload",a),n=!0):!e&&n&&(window.removeEventListener("beforeunload",a),n=!1)}t("block_page_change").then(e=>o(e===1));chrome.runtime.onMessage.addListener(e=>{"action"in e&&e.action==="block_page_change"&&o(!!e.value)});

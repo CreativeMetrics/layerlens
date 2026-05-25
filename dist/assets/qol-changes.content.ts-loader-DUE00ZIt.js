@@ -1,0 +1,13 @@
+(function () {
+  'use strict';
+
+  const injectTime = performance.now();
+  (async () => {
+    const { onExecute } = await import(
+      /* @vite-ignore */
+      chrome.runtime.getURL("assets/qol-changes.content.ts-BSwSnX7j.js")
+    );
+    onExecute?.({ perf: { injectTime, loadTime: performance.now() - injectTime } });
+  })().catch(console.error);
+
+})();

@@ -1,0 +1,19 @@
+{
+  "name": "layerlens",
+  "version": "5.1.0-dev",
+  "description": "Vedi dentro il tuo GTM: filtri e strumenti per Tag Manager + inspector del dataLayer.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.4.0",
+    "@types/chrome": "^0.1.42",
+    "typescript": "^6.0.3",
+    "vite": "^6.4.2"
+  }
+}
