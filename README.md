@@ -17,9 +17,9 @@ Chrome extension (Manifest V3) that adds quality-of-life improvements to the Goo
 ## Install (unpacked — no Chrome Web Store)
 
 1. Download **`layerlens.zip`** from the [latest Release](https://github.com/CreativeMetrics/layerlens/releases/latest)
-2. Unzip it — you'll get a `dist/` folder
+2. Unzip it — you'll get a `layerlens/` folder
 3. Open Chrome → `chrome://extensions` → enable **Developer mode** (top-right toggle)
-4. Click **Load unpacked** → select the `dist/` folder
+4. Click **Load unpacked** → select the `layerlens/` folder
 5. The LayerLens icon appears in your toolbar
 
 ## Build from source
