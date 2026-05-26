@@ -200,4 +200,27 @@ body {
 @media (prefers-color-scheme: dark) {
   .k { color: #d4a5e8; } .s { color: #5dcaa5; } .n { color: #85b7eb; } .b { color: #f0997b; }
 }
+/* Scope toggle (Pagina / Storico) */
+.scope-toggle {
+  display: flex; border: 0.5px solid var(--border);
+  border-radius: 7px; overflow: hidden; flex-shrink: 0;
+}
+.scope-btn {
+  padding: 4px 8px; font-size: 11px; background: none;
+  border: none; cursor: pointer; color: var(--muted); font-family: inherit;
+  transition: background 0.12s, color 0.12s;
+}
+.scope-btn.scope-active { background: var(--brand); color: var(--ink); font-weight: 600; }
+.scope-btn:not(.scope-active):hover { background: var(--surface-2); color: var(--text); }
+
+/* Page separator between history visits */
+.page-separator {
+  display: flex; align-items: center; gap: 8px;
+  margin: 4px 0 9px; font-size: 10px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em; user-select: none;
+}
+.page-separator::before, .page-separator::after {
+  content: ''; flex: 1; height: 0.5px; background: var(--border);
+}
+
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }

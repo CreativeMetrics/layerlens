@@ -122,6 +122,7 @@ function makePushNode(push: unknown, index: number): HTMLElement {
   // Store searchable text as data attributes so applyFilter() never touches the DOM.
   wrap.dataset.ev = event.toLowerCase()
   wrap.dataset.json = json.toLowerCase()
+  wrap.dataset.raw = json  // original JSON string — used by pin persistence
   wrap.innerHTML = `
     <div class="push-head">
       <svg class="chev" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6l-6 6"/></svg>
@@ -150,62 +151,128 @@ function makePushNode(push: unknown, index: number): HTMLElement {
 }
 
 let pushCounter = 0
-/** All pushes accumulated since the last renderDataLayer call (newest first). */
+/** All pushes of the current page (newest first) — used for export. */
 let allPushes: unknown[] = []
 /** Current text filter (lowercase). Empty string = no filter active. */
 let filterText = ''
 
-// ── Pin helpers ───────────────────────────────────────────────────────────────
+// ── Page-history & pin state ──────────────────────────────────────────────────
 
-/** Move all pinned cards to the top, add a separator, then unpinned below. */
-function sortPushes() {
+/** Raw JSON (original formatting) of every pinned push.
+ *  Stored as strings so pins survive renderDataLayer (page navigation). */
+const pinnedRaws = new Set<string>()
+
+/** Previous page visits, most recent first. */
+interface PageRecord { label: string; pushes: unknown[] }
+let historyPages: PageRecord[] = []
+/** Current page's pushes, oldest → newest. */
+let currentPushes: unknown[] = []
+let visitCounter = 0
+let currentPageLabel = ''
+
+/** Whether the filter searches only the current page or the whole history. */
+let searchScope: 'page' | 'all' = 'page'
+
+// ── Core render ───────────────────────────────────────────────────────────────
+
+/** Full rebuild of the push list from stored state.
+ *  Called on page navigation, pin toggle, and scope change. */
+function rebuildPushList() {
   const body = $('dl-modal-body')
+  const countEl = $('dl-count')
   if (!body) return
-  body.querySelector('.pin-separator')?.remove()
-  const cards = Array.from(body.querySelectorAll<HTMLElement>(':scope > .push'))
-  const pinned = cards.filter((c) => c.classList.contains('pinned'))
-  const unpinned = cards.filter((c) => !c.classList.contains('pinned'))
-  if (pinned.length === 0) return
-  // Build a DocumentFragment — appending DOM nodes to a fragment removes them
-  // from their current parent, so body empties as we fill the fragment.
-  const frag = document.createDocumentFragment()
-  pinned.forEach((c) => frag.appendChild(c))
-  const sep = document.createElement('div')
-  sep.className = 'pin-separator'
-  sep.innerHTML = '<span>fissati</span>'
-  frag.appendChild(sep)
-  unpinned.forEach((c) => frag.appendChild(c))
-  body.appendChild(frag)
+  body.innerHTML = ''
+
+  // PINNED SECTION — re-created from pinnedRaws so pins survive page changes.
+  if (pinnedRaws.size > 0) {
+    let pi = -1
+    for (const raw of pinnedRaws) {
+      try {
+        const push = JSON.parse(raw)
+        const node = makePushNode(push, pi--)
+        node.classList.add('pinned')
+        const btn = node.querySelector<HTMLElement>('.pin-btn')
+        if (btn) { btn.title = 'Rimuovi dai fissati'; btn.setAttribute('aria-pressed', 'true') }
+        body.appendChild(node)
+      } catch { /* skip corrupt entry */ }
+    }
+    const sep = document.createElement('div')
+    sep.className = 'pin-separator'
+    sep.innerHTML = '<span>fissati</span>'
+    body.appendChild(sep)
+  }
+
+  // CURRENT PAGE — newest first, skip anything already pinned.
+  const totalCurrent = currentPushes.length
+  ;[...currentPushes].reverse().forEach((push, i) => {
+    const raw = JSON.stringify(push, null, 2)
+    if (pinnedRaws.has(raw)) return
+    body.appendChild(makePushNode(push, totalCurrent - 1 - i))
+  })
+
+  // HISTORY PAGES — shown only in "all" scope mode.
+  if (searchScope === 'all') {
+    for (const page of historyPages) {
+      const sep = document.createElement('div')
+      sep.className = 'page-separator'
+      sep.innerHTML = `<span>${escapeHtml(page.label)} — ${page.pushes.length} push</span>`
+      body.appendChild(sep)
+      ;[...page.pushes].reverse().forEach((push, i) => {
+        const raw = JSON.stringify(push, null, 2)
+        if (pinnedRaws.has(raw)) return
+        const node = makePushNode(push, page.pushes.length - 1 - i)
+        node.dataset.historyPage = page.label
+        body.appendChild(node)
+      })
+    }
+  }
+
+  // Empty state (no pins and no page pushes visible).
+  const hasPushes = body.querySelector('.push')
+  if (!hasPushes) {
+    const p = document.createElement('p')
+    p.className = 'muted small'
+    p.textContent = 'Nessun push nel dataLayer di questa pagina.'
+    body.appendChild(p)
+  }
+
+  // Update total count badge.
+  if (countEl) {
+    const total =
+      searchScope === 'all'
+        ? currentPushes.length + historyPages.reduce((s, pg) => s + pg.pushes.length, 0)
+        : currentPushes.length
+    countEl.textContent = total ? String(total) : ''
+  }
+
+  applyFilter()
 }
 
-/** Toggle the pinned state of a push card and re-sort. */
+// ── Pin helper ────────────────────────────────────────────────────────────────
+
+/** Toggle the pin on a push card. Pins are stored by raw JSON so they survive
+ *  page navigations — on the next renderDataLayer call they reappear at the top. */
 function togglePin(card: HTMLElement) {
-  const isPinning = !card.classList.contains('pinned')
-  card.classList.toggle('pinned', isPinning)
-  const btn = card.querySelector<HTMLElement>('.pin-btn')
-  if (btn) {
-    btn.title = isPinning ? 'Rimuovi dai fissati' : 'Fissa in cima'
-    btn.setAttribute('aria-pressed', String(isPinning))
+  const raw = card.dataset.raw ?? ''
+  if (!raw) return
+  if (pinnedRaws.has(raw)) {
+    pinnedRaws.delete(raw)
+  } else {
+    pinnedRaws.add(raw)
   }
-  sortPushes()
-  applyFilter()
+  rebuildPushList()
 }
 
 // ── Filter helper ─────────────────────────────────────────────────────────────
 
-/** Show/hide push cards matching the current filterText.
- *  Pinned cards are always visible regardless of the filter. */
+/** Show/hide push cards matching filterText. Pinned cards are always visible. */
 function applyFilter() {
   const body = $('dl-modal-body')
   if (!body) return
   const cards = Array.from(body.querySelectorAll<HTMLElement>(':scope > .push'))
   let visible = 0
   for (const card of cards) {
-    if (card.classList.contains('pinned')) {
-      card.style.display = ''
-      visible++
-      continue
-    }
+    if (card.classList.contains('pinned')) { card.style.display = ''; visible++; continue }
     const matches =
       !filterText ||
       (card.dataset.ev ?? '').includes(filterText) ||
@@ -213,7 +280,6 @@ function applyFilter() {
     card.style.display = matches ? '' : 'none'
     if (matches) visible++
   }
-  // Show "X di Y" feedback only when a filter is active
   const countEl = $('dl-filter-count')
   if (countEl) {
     if (filterText) {
@@ -229,19 +295,9 @@ function renderDataLayer(raw: string, name: string) {
   dataLayerName = name || 'dataLayer'
   const main = $('view-main')
   const view = $('view-dl')
-  const body = $('dl-modal-body')
   const title = $('dl-modal-title')
-  const count = $('dl-count')
-  if (!view || !body || !main) return
+  if (!view || !main) return
   if (title) title.textContent = name || 'dataLayer'
-  body.innerHTML = ''
-
-  // Reset filter and pin state (pins are on DOM nodes, cleared by innerHTML = '').
-  filterText = ''
-  const filterInput = $('dl-filter-input') as HTMLInputElement | null
-  if (filterInput) filterInput.value = ''
-  const filterCount = $('dl-filter-count')
-  if (filterCount) filterCount.style.display = 'none'
 
   let pushes: unknown[] = []
   try {
@@ -250,21 +306,27 @@ function renderDataLayer(raw: string, name: string) {
   } catch {
     pushes = []
   }
-  // Keep a flat copy, newest first, for export.
+
+  // Archive the previous page before replacing currentPushes.
+  if (currentPushes.length > 0) {
+    historyPages.unshift({ label: currentPageLabel, pushes: [...currentPushes] })
+  }
+  visitCounter++
+  currentPageLabel = `Visita ${visitCounter}`
+  currentPushes = [...pushes]  // oldest → newest
   allPushes = [...pushes].reverse()
   pushCounter = pushes.length
-  if (count) count.textContent = pushes.length ? String(pushes.length) : ''
 
-  if (pushes.length === 0) {
-    body.innerHTML = `<p class="muted small">Nessun push nel dataLayer di questa pagina.</p>`
-  } else {
-    // Newest push (highest index in the original array) shown at the top.
-    for (let i = pushes.length - 1; i >= 0; i--) {
-      body.appendChild(makePushNode(pushes[i], i))
-    }
-  }
+  // Reset the text filter but keep pins and scope intact.
+  filterText = ''
+  const filterInput = $('dl-filter-input') as HTMLInputElement | null
+  if (filterInput) filterInput.value = ''
+  const filterCount = $('dl-filter-count')
+  if (filterCount) filterCount.style.display = 'none'
+
   main.setAttribute('hidden', '')
   view.removeAttribute('hidden')
+  rebuildPushList()
 }
 
 /** Append live pushes to the top of the list as they happen. */
@@ -281,13 +343,18 @@ function appendLivePush(raw: string) {
   }
   body.querySelector('.muted')?.remove()
   for (const entry of entries) {
-    allPushes.unshift(entry) // keep newest-first in export buffer
-    const node = makePushNode(entry, pushCounter++)
-    node.classList.add('push-new')
-    // Insert after pinned cards + separator so live pushes don't jump above pins.
-    const sep = body.querySelector<HTMLElement>('.pin-separator')
-    body.insertBefore(node, sep ? sep.nextSibling : body.firstChild)
-    setTimeout(() => node.classList.remove('push-new'), 1200)
+    currentPushes.push(entry)            // accumulate for page history
+    allPushes.unshift(entry)             // keep newest-first in export buffer
+    const rawStr = JSON.stringify(entry, null, 2)
+    if (!pinnedRaws.has(rawStr)) {
+      const node = makePushNode(entry, pushCounter)
+      node.classList.add('push-new')
+      // Insert after pinned cards + separator so live pushes don't jump above pins.
+      const sep = body.querySelector<HTMLElement>('.pin-separator')
+      body.insertBefore(node, sep ? sep.nextSibling : body.firstChild)
+      setTimeout(() => node.classList.remove('push-new'), 1200)
+    }
+    pushCounter++
   }
   if (count) count.textContent = String(pushCounter)
   if (filterText) applyFilter()
@@ -336,6 +403,16 @@ function bindDataLayer() {
     filterText = (filterInput.value ?? '').toLowerCase().trim()
     applyFilter()
   })
+
+  // Scope toggle: "Pagina" (current page only) vs "Storico" (all history).
+  function setScopeActive(scope: 'page' | 'all') {
+    searchScope = scope
+    $('scope-page')?.classList.toggle('scope-active', scope === 'page')
+    $('scope-all')?.classList.toggle('scope-active', scope === 'all')
+    rebuildPushList()
+  }
+  $('scope-page')?.addEventListener('click', () => setScopeActive('page'))
+  $('scope-all')?.addEventListener('click', () => setScopeActive('all'))
 
   const liveBox = $('dl-live') as HTMLInputElement | null
   liveBox?.addEventListener('change', () => {
