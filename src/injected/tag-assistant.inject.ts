@@ -1,21 +1,90 @@
 // Runs in the PAGE world on tagassistant.google.com
 // Adds a search bar and event-pin feature to the GTM debug event list.
 //
-// Selectors are anchored on .message-list__row and .message-list__row--indented
-// (confirmed from live DOM inspection). The MutationObserver + scheduled-rAF
-// pattern mirrors qol-changes.inject.ts so we survive Angular re-renders.
+// SELECTOR DISCOVERY STRATEGY
+// Rather than hardcoding a single CSS selector (which breaks whenever Google
+// renames classes), we use a three-tier approach:
+//   1. BEM block selector (.message-list) — stable as long as the naming convention holds.
+//   2. Fallback via parentElement traversal from a known __element selector.
+//   3. Runtime discovery: at startup we scan the DOM and log candidates to the
+//      console so that updating selectors is a one-line change, not a DOM safari.
+//
+// POSITIONING STRATEGY
+// Inserting the toolbar "before" the list container (beforebegin) only works
+// if the insertion point is static. In Angular SPAs the list is rebuilt on
+// every route change, so "beforebegin" nodes end up in the middle.
+//
+// Fix: walk up to the SCROLL CONTAINER (first ancestor with overflow:auto/scroll)
+// and prepend() the toolbar there. The scroll container is always present and
+// unmanaged by Angular, so prepend is permanent. With position:sticky;top:0 the
+// toolbar stays pinned to the top of the scroll area regardless of list rebuilds.
 
-const ROOT_ID     = 'amd-ta-root'
-const PINNED_ID   = 'amd-ta-pinned'
-const HIDDEN_CLS  = 'amd-ta-hidden'
-const PIN_CLS     = 'amd-ta-pin-btn'
-const PIN_ON_CLS  = 'amd-ta-pin-on'
-const HIGHLIGHT   = 'amd-ta-hl'
+const ROOT_ID    = 'amd-ta-root'
+const PINNED_ID  = 'amd-ta-pinned'
+const HIDDEN_CLS = 'amd-ta-hidden'
+const PIN_CLS    = 'amd-ta-pin-btn'
+const PIN_ON_CLS = 'amd-ta-pin-on'
+const HIGHLIGHT  = 'amd-ta-hl'
 
-/** Lowercase event names the user has pinned. Persists across page navigations
- *  within the same Tag Assistant session (module-level). */
+/** Lowercase event names the user has pinned. Module-level = survives Angular re-renders. */
 const pinnedNames = new Set<string>()
 let filterText = ''
+
+// ── Selector discovery ───────────────────────────────────────────────────────
+
+/** Candidates in priority order. First match wins. */
+const LIST_SELECTORS = [
+  '.message-list',                          // BEM block (most stable)
+  '[class*="message-list"]',                // substring match (fallback)
+  '.messages-panel',                        // alternative naming
+]
+
+const ROW_SELECTORS = [
+  '.message-list__row--indented',           // confirmed from DOM inspection
+  '[class*="message-list__row"][class*="indented"]',
+  '[class*="message-list__row--indented"]',
+]
+
+const SEP_SELECTORS = [
+  '.message-list__row:not(.message-list__row--indented)',
+  '[class*="message-list__row"]:not([class*="indented"])',
+]
+
+/** Runs once at startup; logs available selectors to the console so updating
+ *  them later is trivial ("search for amd-ta-discovery in DevTools"). */
+function discoverAndLog() {
+  const results: string[] = []
+
+  for (const sel of LIST_SELECTORS) {
+    const n = document.querySelectorAll(sel).length
+    if (n) results.push(`list container: "${sel}" (${n} found)`)
+  }
+  for (const sel of ROW_SELECTORS) {
+    const n = document.querySelectorAll(sel).length
+    if (n) results.push(`event row: "${sel}" (${n} found)`)
+  }
+  if (results.length) {
+    console.groupCollapsed('[LayerLens] Tag Assistant selector discovery')
+    results.forEach(r => console.log(r))
+    console.groupEnd()
+  }
+}
+
+function firstMatch(selectors: string[], root: ParentNode = document): HTMLElement | null {
+  for (const sel of selectors) {
+    const el = root.querySelector<HTMLElement>(sel)
+    if (el) return el
+  }
+  return null
+}
+
+function allMatches(selectors: string[], root: ParentNode = document): HTMLElement[] {
+  for (const sel of selectors) {
+    const els = Array.from(root.querySelectorAll<HTMLElement>(sel))
+    if (els.length) return els
+  }
+  return []
+}
 
 // ── DOM helpers ──────────────────────────────────────────────────────────────
 
@@ -26,14 +95,27 @@ function evName(row: HTMLElement): string {
   )
 }
 
-function listParent(): HTMLElement | null {
-  return document.querySelector<HTMLElement>('.message-list__row')?.parentElement ?? null
+function listContainer(): HTMLElement | null {
+  const direct = firstMatch(LIST_SELECTORS)
+  if (direct) return direct
+  // Fallback: parent of first event row
+  return firstMatch(ROW_SELECTORS)?.parentElement ?? null
+}
+
+/** Walk up to the first scrollable ancestor. This element is stable across
+ *  Angular SPA route changes — a safe permanent insertion point. */
+function scrollAncestor(el: HTMLElement): HTMLElement {
+  let p = el.parentElement
+  while (p && p !== document.body) {
+    const { overflowY } = getComputedStyle(p)
+    if (overflowY === 'auto' || overflowY === 'scroll') return p
+    p = p.parentElement
+  }
+  return el.parentElement ?? document.body
 }
 
 function evRows(): HTMLElement[] {
-  return Array.from(
-    document.querySelectorAll<HTMLElement>('.message-list__row--indented'),
-  )
+  return allMatches(ROW_SELECTORS)
 }
 
 function escHtml(s: string) {
@@ -51,11 +133,11 @@ function injectStyles() {
   const s = document.createElement('style')
   s.id = 'amd-ta-style'
   s.textContent = `
-    /* ── utility ── */
     .${HIDDEN_CLS} { display: none !important; }
 
-    /* ── search toolbar ── */
+    /* toolbar: sticky top inside the scroll container */
     #${ROOT_ID} {
+      position: sticky; top: 0; z-index: 100;
       display: flex; align-items: center; gap: 8px;
       padding: 8px 10px;
       background: #fff; border-bottom: 1px solid rgba(0,0,0,.1);
@@ -73,9 +155,8 @@ function injectStyles() {
     .amd-ta-searchbox input::-webkit-search-cancel-button { -webkit-appearance: none; }
     #amd-ta-count { font-size: 11px; color: #5f6368; flex-shrink: 0; white-space: nowrap; }
 
-    /* ── pin button on each event row ── */
+    /* pin button on each event row */
     .message-list__row--indented { position: relative; }
-
     .${PIN_CLS} {
       display: none;
       position: absolute; right: 30px; top: 50%; transform: translateY(-50%);
@@ -83,34 +164,27 @@ function injectStyles() {
       border-radius: 5px; color: #9aa0a6; line-height: 0;
       transition: color .12s, background .12s;
     }
-    /* show on row hover or when active */
     .message-list__row--indented:hover .${PIN_CLS},
     .${PIN_CLS}.${PIN_ON_CLS} { display: inline-flex; }
-
     .${PIN_CLS}:hover { color: #202124; background: rgba(0,0,0,.07); }
     .${PIN_CLS}.${PIN_ON_CLS} { color: #e5c614; }
-
-    /* subtle yellow left-bar on pinned rows in the main list */
     .${HIGHLIGHT} { box-shadow: inset 3px 0 0 #e5c614; }
 
-    /* ── pinned section ── */
+    /* pinned section — sticky below toolbar */
     #${PINNED_ID} {
-      border-bottom: 1px solid rgba(0,0,0,.1);
-      background: #fff;
+      position: sticky; top: 45px; z-index: 99;
+      background: #fff; border-bottom: 1px solid rgba(0,0,0,.1);
     }
     .amd-ta-pin-sep {
       padding: 4px 10px 2px; font-size: 10px; font-weight: 700;
       color: #9aa0a6; text-transform: uppercase; letter-spacing: .06em;
       font-family: system-ui, sans-serif;
     }
-    /* cloned rows inside the pinned section */
     .amd-ta-clone {
       background: rgba(229,198,20,.07) !important;
       box-shadow: inset 3px 0 0 #e5c614 !important;
     }
-    .amd-ta-clone .${PIN_CLS} {
-      display: inline-flex !important; color: #e5c614;
-    }
+    .amd-ta-clone .${PIN_CLS} { display: inline-flex !important; color: #e5c614; }
     .amd-ta-placeholder {
       padding: 7px 10px; font-size: 13px; color: #9aa0a6;
       font-style: italic; font-family: system-ui, sans-serif;
@@ -122,9 +196,13 @@ function injectStyles() {
 // ── Toolbar ──────────────────────────────────────────────────────────────────
 
 function injectToolbar() {
-  if (document.getElementById(ROOT_ID)) return
-  const parent = listParent()
-  if (!parent) return
+  // Re-inject if disconnected (Angular may have rebuilt the scroll container).
+  if (document.getElementById(ROOT_ID)?.isConnected) return
+  document.getElementById(ROOT_ID)?.remove()
+
+  const list = listContainer()
+  if (!list) return
+  const scroll = scrollAncestor(list)
 
   const root = document.createElement('div')
   root.id = ROOT_ID
@@ -134,7 +212,8 @@ function injectToolbar() {
       <input type="search" id="amd-ta-search-input" placeholder="Cerca eventi…" autocomplete="off" spellcheck="false" />
       <span id="amd-ta-count" style="display:none"></span>
     </div>`
-  parent.insertAdjacentElement('beforebegin', root)
+  // prepend inside the scroll container so sticky:top works correctly
+  scroll.prepend(root)
 
   document.getElementById('amd-ta-search-input')
     ?.addEventListener('input', (e) => {
@@ -145,50 +224,40 @@ function injectToolbar() {
 
 // ── Pinned section ───────────────────────────────────────────────────────────
 
-/** Rebuild the clone cards inside #amd-ta-pinned.
- *  Mutations here are INSIDE the section, so the observer's `ours` guard
- *  absorbs them and prevents a sync loop. */
 function updatePinnedSection() {
   if (pinnedNames.size === 0) {
     document.getElementById(PINNED_ID)?.remove()
     return
   }
 
-  // Ensure the container exists (inserted once, before the list parent).
-  let section = document.getElementById(PINNED_ID)
-  if (!section) {
-    section = document.createElement('div')
-    section.id = PINNED_ID
+  // Re-create if disconnected (e.g. after Angular re-render).
+  if (!document.getElementById(PINNED_ID)?.isConnected) {
+    document.getElementById(PINNED_ID)?.remove()
     const toolbar = document.getElementById(ROOT_ID)
-    if (toolbar) {
-      toolbar.insertAdjacentElement('afterend', section)
-    } else {
-      listParent()?.insertAdjacentElement('beforebegin', section)
-    }
+    if (!toolbar?.isConnected) return  // toolbar not ready yet
+
+    const section = document.createElement('div')
+    section.id = PINNED_ID
+    toolbar.insertAdjacentElement('afterend', section)
   }
-  if (!section.isConnected) return
 
-  // Rebuild content.
+  const section = document.getElementById(PINNED_ID)!
   section.innerHTML = `<div class="amd-ta-pin-sep">Fissati</div>`
+
   const rows = evRows()
-
   for (const name of pinnedNames) {
-    // Show the most-recent occurrence of this event name on the current page.
     const original = [...rows].reverse().find(r => evName(r).toLowerCase() === name)
-
     if (original) {
       const clone = original.cloneNode(true) as HTMLElement
       clone.classList.add('amd-ta-clone')
       clone.removeAttribute('data-amd-pin-added')
-      // Remove stale pin buttons from the clone and add a fresh unpin one.
       clone.querySelectorAll(`.${PIN_CLS}`).forEach(b => b.remove())
       attachCloneUnpin(clone, name)
       section.appendChild(clone)
     } else {
-      // Event not visible on this page — show a placeholder.
       const ph = document.createElement('div')
       ph.className = 'amd-ta-placeholder'
-      ph.textContent = `${name} (non in questa pagina)`
+      ph.textContent = `${name} — non in questa pagina`
       section.appendChild(ph)
     }
   }
@@ -203,20 +272,23 @@ function attachCloneUnpin(row: HTMLElement, name: string) {
   btn.innerHTML = pinSvg()
   btn.addEventListener('click', (e) => {
     e.stopPropagation(); e.preventDefault()
-    unpin(name)
+    unpinByName(name)
   })
   row.appendChild(btn)
 }
 
-function unpin(name: string) {
+function unpinByName(name: string) {
   pinnedNames.delete(name)
-  // Update original rows in the main list.
   evRows()
     .filter(r => evName(r).toLowerCase() === name)
     .forEach(r => {
       r.classList.remove(HIGHLIGHT)
       const b = r.querySelector<HTMLButtonElement>(`.${PIN_CLS}`)
-      if (b) { b.classList.remove(PIN_ON_CLS); b.title = 'Fissa in cima'; b.setAttribute('aria-pressed', 'false') }
+      if (b) {
+        b.classList.remove(PIN_ON_CLS)
+        b.title = 'Fissa in cima'
+        b.setAttribute('aria-pressed', 'false')
+      }
     })
   updatePinnedSection()
 }
@@ -231,23 +303,17 @@ function applyFilter(rows: HTMLElement[]) {
     if (match) visible++
   }
 
-  // Hide page-separator rows when all their events are filtered out.
-  const parent = listParent()
-  if (parent) {
-    const seps = Array.from(
-      parent.querySelectorAll<HTMLElement>('.message-list__row:not(.message-list__row--indented)'),
-    )
-    for (const sep of seps) {
-      if (!filterText) { sep.classList.remove(HIDDEN_CLS); continue }
-      let next = sep.nextElementSibling as HTMLElement | null
-      let hasVisible = false
-      while (next) {
-        if (!next.classList.contains('message-list__row--indented')) break
-        if (!next.classList.contains(HIDDEN_CLS)) { hasVisible = true; break }
-        next = next.nextElementSibling as HTMLElement | null
-      }
-      sep.classList.toggle(HIDDEN_CLS, !hasVisible)
+  // Hide page-separator rows whose events are all filtered out.
+  const seps = allMatches(SEP_SELECTORS)
+  for (const sep of seps) {
+    if (!filterText) { sep.classList.remove(HIDDEN_CLS); continue }
+    let next = sep.nextElementSibling as HTMLElement | null
+    let hasVisible = false
+    while (next && next.matches(ROW_SELECTORS[0])) {
+      if (!next.classList.contains(HIDDEN_CLS)) { hasVisible = true; break }
+      next = next.nextElementSibling as HTMLElement | null
     }
+    sep.classList.toggle(HIDDEN_CLS, !hasVisible)
   }
 
   const countEl = document.getElementById('amd-ta-count')
@@ -278,15 +344,12 @@ function addPinButtons(rows: HTMLElement[]) {
     btn.title = pinned ? 'Rimuovi dai fissati' : 'Fissa in cima'
     btn.setAttribute('aria-pressed', String(pinned))
     btn.innerHTML = pinSvg()
+
     btn.addEventListener('click', (e) => {
       e.stopPropagation(); e.preventDefault()
       const nowPinned = !pinnedNames.has(name)
-      if (nowPinned) {
-        pinnedNames.add(name)
-      } else {
-        pinnedNames.delete(name)
-      }
-      // Sync all rows with the same event name.
+      if (nowPinned) { pinnedNames.add(name) } else { pinnedNames.delete(name) }
+      // Sync ALL rows with the same event name (they may appear in multiple pages).
       evRows()
         .filter(r => evName(r).toLowerCase() === name)
         .forEach(r => {
@@ -300,28 +363,28 @@ function addPinButtons(rows: HTMLElement[]) {
         })
       updatePinnedSection()
     })
+
     row.appendChild(btn)
   }
 }
 
 // ── Main sync ────────────────────────────────────────────────────────────────
 
-/** Idempotent: safe to call on every Angular re-render.
- *  All DOM insertions are one-shot (guarded by id/dataset checks). */
+/** Idempotent: safe on every Angular re-render.
+ *  The toolbar re-injects itself if disconnected (SPA route change). */
 function sync() {
-  if (!document.querySelector('.message-list__row')) return
+  if (!firstMatch(ROW_SELECTORS)) return
   injectStyles()
   injectToolbar()
   const rows = evRows()
-  if (rows.length === 0) return
   addPinButtons(rows)
   applyFilter(rows)
-  // Re-sync the pinned section after pin buttons are added.
-  // Wrapped in rAF so mutations happen INSIDE #amd-ta-pinned (ours-guarded).
+  // Update pinned section in the next frame so clones come from fresh rows.
   requestAnimationFrame(updatePinnedSection)
 }
 
 let scheduled = false
+let discovered = false
 const observer = new MutationObserver((muts) => {
   // Ignore mutations that originate inside our own injected nodes.
   const ours = muts.every((m) => {
@@ -330,8 +393,14 @@ const observer = new MutationObserver((muts) => {
   })
   if (ours || scheduled) return
   scheduled = true
-  requestAnimationFrame(() => { scheduled = false; sync() })
+  requestAnimationFrame(() => {
+    scheduled = false
+    if (!discovered && firstMatch(ROW_SELECTORS)) {
+      discovered = true
+      discoverAndLog()
+    }
+    sync()
+  })
 })
 observer.observe(document.body, { childList: true, subtree: true })
-
 sync()
