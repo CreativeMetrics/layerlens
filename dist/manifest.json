@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LayerLens",
-  "version": "5.3.2",
+  "version": "5.4.0",
   "description": "Vedi dentro il tuo GTM: filtri e strumenti per Tag Manager + inspector del dataLayer.",
   "icons": {
     "16": "img/icon-16.png",
@@ -32,7 +32,7 @@
       "js": [
         "assets/block-page-change.content.ts-loader-DkZaehDn.js",
         "assets/datalayer-checker.content.ts-wXkMdQKM.js",
-        "assets/qol-changes.content.ts-loader-DUE00ZIt.js"
+        "assets/qol-changes.content.ts-loader-C9QoWEQG.js"
       ],
       "matches": [
         "<all_urls>"
@@ -54,7 +54,8 @@
         "assets/datalayer-checker.inject.ts-DB-WYtZR.js",
         "assets/datalayer-checker.content.ts-wXkMdQKM.js",
         "assets/qol-changes.inject.ts-B2ycCkHa.js",
-        "assets/qol-changes.content.ts-BSwSnX7j.js"
+        "assets/tag-assistant.inject.ts-Bh0DIOLr.js",
+        "assets/qol-changes.content.ts-D_kLODl9.js"
       ],
       "use_dynamic_url": false
     }
