@@ -173,10 +173,6 @@ let currentPageLabel = ''
 /** Whether the filter searches only the current page or the whole history. */
 let searchScope: 'page' | 'all' = 'page'
 
-/** Set to true after restoring session state so the next renderDataLayer call
- *  (which fires immediately to refresh the current page) doesn't archive the
- *  just-restored currentPushes as a brand-new history entry. */
-let skipNextArchive = false
 
 // ── Session-state persistence ─────────────────────────────────────────────────
 // chrome.storage.session survives popup close/reopen within the same browser
@@ -204,13 +200,18 @@ async function loadSessionState() {
       for (const s of r.ll_pins as string[]) pinnedRaws.add(s)
     }
     if (Array.isArray(r.ll_history)) historyPages = r.ll_history as PageRecord[]
-    if (Array.isArray(r.ll_current)) currentPushes = r.ll_current as unknown[]
     if (typeof r.ll_visit === 'number') visitCounter = r.ll_visit
     if (typeof r.ll_page_label === 'string') currentPageLabel = r.ll_page_label
-    // If any state was restored, skip archiving on the very next renderDataLayer
-    // so we don't double-add the current page to history when the popup reopens.
-    if (currentPushes.length > 0 || historyPages.length > 0 || pinnedRaws.size > 0) {
-      skipNextArchive = true
+    // Move the restored currentPushes straight into historyPages.
+    // Rationale: the popup is ephemeral — it closed when the user navigated.
+    // The "current" page from the last session is now a *past* visit.
+    // Archiving it here means renderDataLayer (called immediately after to
+    // refresh the new page) will find currentPushes empty and won't try to
+    // double-archive, while history already contains the previous visit.
+    const restoredCurrent = Array.isArray(r.ll_current) ? r.ll_current as unknown[] : []
+    if (restoredCurrent.length > 0) {
+      historyPages.unshift({ label: currentPageLabel, pushes: restoredCurrent })
+      // currentPushes stays [] — renderDataLayer will populate it for the new page
     }
   } catch { /* session storage unavailable */ }
 }
@@ -308,11 +309,14 @@ function togglePin(card: HTMLElement) {
 
 // ── Filter helper ─────────────────────────────────────────────────────────────
 
-/** Show/hide push cards matching filterText. Pinned cards are always visible. */
+/** Show/hide push cards matching filterText. Pinned cards are always visible.
+ *  Also hides page-separators whose cards are all filtered out. */
 function applyFilter() {
   const body = $('dl-modal-body')
   if (!body) return
-  const cards = Array.from(body.querySelectorAll<HTMLElement>(':scope > .push'))
+  // Use .push (not :scope > .push) to be consistent with both current and
+  // history cards, all of which are direct children of body.
+  const cards = Array.from(body.querySelectorAll<HTMLElement>('.push'))
   let visible = 0
   for (const card of cards) {
     if (card.classList.contains('pinned')) { card.style.display = ''; visible++; continue }
@@ -322,6 +326,20 @@ function applyFilter() {
       (card.dataset.json ?? '').includes(filterText)
     card.style.display = matches ? '' : 'none'
     if (matches) visible++
+  }
+  // Hide page-separators that have no visible cards below them.
+  const seps = Array.from(body.querySelectorAll<HTMLElement>('.page-separator'))
+  for (const sep of seps) {
+    if (!filterText) { sep.style.display = ''; continue }
+    let sibling = sep.nextElementSibling as HTMLElement | null
+    let hasVisible = false
+    while (sibling && !sibling.classList.contains('page-separator')) {
+      if (sibling.classList.contains('push') && sibling.style.display !== 'none') {
+        hasVisible = true; break
+      }
+      sibling = sibling.nextElementSibling as HTMLElement | null
+    }
+    sep.style.display = hasVisible ? '' : 'none'
   }
   const countEl = $('dl-filter-count')
   if (countEl) {
@@ -351,13 +369,11 @@ function renderDataLayer(raw: string, name: string) {
   }
 
   // Archive the previous page before replacing currentPushes.
-  // skipNextArchive is true when we just restored state from session storage
-  // (popup reopen) — the existing currentPushes already represent the current
-  // page and must NOT be double-added to history.
-  if (currentPushes.length > 0 && !skipNextArchive) {
+  // On popup reopen, currentPushes is already [] (moved to historyPages
+  // by loadSessionState), so this branch is a no-op — no double-archiving.
+  if (currentPushes.length > 0) {
     historyPages.unshift({ label: currentPageLabel, pushes: [...currentPushes] })
   }
-  skipNextArchive = false
   visitCounter++
   currentPageLabel = `Visita ${visitCounter}`
   currentPushes = [...pushes]  // oldest → newest
@@ -405,6 +421,7 @@ function appendLivePush(raw: string) {
     pushCounter++
   }
   if (count) count.textContent = String(pushCounter)
+  saveSessionState()
   if (filterText) applyFilter()
 }
 
