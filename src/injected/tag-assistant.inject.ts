@@ -43,20 +43,13 @@ const SEP_SELECTORS = [
   '[class*="message-list__row"]:not([class*="indented"])',
 ]
 
-// Variables tab — broad fallbacks; discovery logs the winner at runtime.
-const VAR_CONTAINER_SELECTORS = [
-  '.variable-list',
-  '[class*="variable-list"]',
-  'ctui-variable-list',
-  '[class*="variables-panel"]',
-]
-
-const VAR_ROW_SELECTORS = [
-  '.variable-list__row',
-  '[class*="variable-list__row"]',
-  '[class*="variable-list"] tr',
-  '[class*="variable-list"] li',
-]
+// Variables tab — confirmed selectors from real DOM inspection.
+// The Angular component hides itself via aria-hidden="true" / class="ng-hide".
+const VAR_TAB_SELECTOR  = 'variables-tab:not([aria-hidden="true"]):not(.ng-hide)'
+const VAR_ROW_SEL       = '.gtm-debug-variable-table-row'
+const VAR_NAME_SEL      = '.gtm-debug-chip'
+const VAR_VALUE_SEL     = '.gtm-debug-variable-table-value'
+const VAR_CARD_SEL      = '.gtm-debug-variable-pane-content'
 
 // ── Selector helpers ──────────────────────────────────────────────────────────
 
@@ -85,10 +78,12 @@ function discoverAndLog() {
       if (n) out.push(`${label}: "${sel}" (${n})`)
     }
   }
-  check('event list',   LIST_SELECTORS)
-  check('event row',    ROW_SELECTORS)
-  check('var container', VAR_CONTAINER_SELECTORS)
-  check('var row',      VAR_ROW_SELECTORS)
+  check('event list', LIST_SELECTORS)
+  check('event row',  ROW_SELECTORS)
+  ;[VAR_TAB_SELECTOR, VAR_ROW_SEL, VAR_NAME_SEL, VAR_VALUE_SEL].forEach(sel => {
+    const n = document.querySelectorAll(sel).length
+    if (n) out.push(`var: "${sel}" (${n})`)
+  })
   if (out.length) {
     console.groupCollapsed('[LayerLens] Tag Assistant selector discovery')
     out.forEach(r => console.log(r))
@@ -477,37 +472,37 @@ function addPinButtons(rows: HTMLElement[]) {
 
 // ── Variables search ──────────────────────────────────────────────────────────
 
-function varContainer(): HTMLElement | null {
-  return firstMatch(VAR_CONTAINER_SELECTORS)
-}
-
-function varRows(container: HTMLElement): HTMLElement[] {
-  return allMatches(VAR_ROW_SELECTORS, container)
+/** Returns the <variables-tab> element only when the Variables tab is selected. */
+function varTabEl(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(VAR_TAB_SELECTOR)
 }
 
 function injectVarSearch() {
-  const container = varContainer()
+  const tab = varTabEl()
 
-  // Container gone or invisible → clean up and return
-  if (!container) {
+  // Tab hidden or not present → remove search bar if it exists
+  if (!tab) {
     document.getElementById(VAR_ROOT_ID)?.remove()
     return
   }
 
-  // Already injected and connected → just re-apply filter
+  // Already injected and connected → just re-apply the current filter
   if (document.getElementById(VAR_ROOT_ID)?.isConnected) {
-    applyVarFilter(container)
+    applyVarFilter(tab)
     return
   }
 
   document.getElementById(VAR_ROOT_ID)?.remove()
 
-  // Insert our bar just before the variable list container
+  // Inject before the variable table, inside the card container
+  const card = tab.querySelector<HTMLElement>(VAR_CARD_SEL)
+  if (!card) return
+
   const root = document.createElement('div')
   root.id = VAR_ROOT_ID
   root.innerHTML = `
-    <div class="amd-ta-brand" style="font-size:10px;padding:3px 7px 3px 6px">
-      <svg viewBox="0 0 20 20" width="13" height="13" aria-hidden="true">
+    <div class="amd-ta-brand">
+      <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
         <circle cx="10" cy="10" r="9" fill="#2c2c2a"/>
         <circle cx="10" cy="10" r="5" fill="none" stroke="#e5c614" stroke-width="2"/>
         <circle cx="12.8" cy="7.2" r="1.6" fill="#e5c614"/>
@@ -516,32 +511,35 @@ function injectVarSearch() {
     </div>
     <div class="amd-ta-searchbox">
       ${searchSvg(13)}
-      <input type="search" id="amd-ta-var-input" placeholder="Filtra variabili…" autocomplete="off" spellcheck="false" />
+      <input type="search" id="amd-ta-var-input"
+             placeholder="Cerca variabile o valore…"
+             autocomplete="off" spellcheck="false" />
       <span id="amd-ta-var-count" style="display:none"></span>
     </div>`
 
-  // Try to prepend inside the variable scroll container; fallback to before the container
-  const varScroll = scrollAncestor(container)
-  if (varScroll && varScroll !== document.body && varScroll !== container) {
-    varScroll.prepend(root)
-  } else {
-    container.parentElement?.insertBefore(root, container)
-  }
+  // Prepend to the card so it sits above the table
+  card.prepend(root)
 
-  document.getElementById('amd-ta-var-input')
-    ?.addEventListener('input', (e) => {
-      varFilterText = (e.target as HTMLInputElement).value.toLowerCase().trim()
-      const c = varContainer()
-      if (c) applyVarFilter(c)
-    })
+  // Restore any existing filter text (user switched tabs and came back)
+  const input = root.querySelector<HTMLInputElement>('#amd-ta-var-input')!
+  if (varFilterText) input.value = varFilterText
+
+  input.addEventListener('input', (e) => {
+    varFilterText = (e.target as HTMLInputElement).value.toLowerCase().trim()
+    const t = varTabEl()
+    if (t) applyVarFilter(t)
+  })
+
+  applyVarFilter(tab)
 }
 
-function applyVarFilter(container: HTMLElement) {
-  const rows = varRows(container)
+function applyVarFilter(tab: HTMLElement) {
+  const rows = Array.from(tab.querySelectorAll<HTMLElement>(VAR_ROW_SEL))
   let visible = 0
   for (const row of rows) {
-    const text = row.textContent?.toLowerCase() ?? ''
-    const match = !varFilterText || text.includes(varFilterText)
+    const name  = row.querySelector(VAR_NAME_SEL)?.textContent?.toLowerCase()  ?? ''
+    const value = row.querySelector(VAR_VALUE_SEL)?.textContent?.toLowerCase() ?? ''
+    const match = !varFilterText || name.includes(varFilterText) || value.includes(varFilterText)
     row.classList.toggle(VAR_HIDDEN_CLS, !match)
     if (match) visible++
   }
