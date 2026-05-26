@@ -347,7 +347,12 @@ function updatePinnedSection() {
       clone.addEventListener('click', (e) => {
         if ((e.target as HTMLElement).closest(`.${PIN_CLS}`)) return
         e.preventDefault(); e.stopPropagation()
-        const target = evRows().find(r => evIndex(r) === key)
+        // Exclude clones inside #PINNED_ID — they share the same class and
+        // evIndex, so find() would return the clone itself (already visible)
+        // instead of the original row in the list.
+        const target = evRows()
+          .filter(r => !r.closest(`#${PINNED_ID}`))
+          .find(r => evIndex(r) === key)
         if (!target) return
         scrollToRow(target)
         // Flash the target row so it's obvious where we landed
