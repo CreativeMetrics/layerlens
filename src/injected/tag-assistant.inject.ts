@@ -132,17 +132,27 @@ function evRows(): HTMLElement[] { return allMatches(ROW_SELECTORS) }
  * Removing target.click() here: it was cancelling the smooth scroll in Chrome.
  */
 function scrollToRow(target: HTMLElement) {
-  // The scroll container is the direct parent of our toolbar.
-  const scrollEl = document.getElementById(ROOT_ID)?.parentElement ?? scrollAncestor(target)
-  const stickyH  = (document.getElementById(ROOT_ID)?.offsetHeight  ?? 46)
-                 + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
-                 + 10
-  const targetTop = target.getBoundingClientRect().top
-  const contTop   = scrollEl.getBoundingClientRect().top
-  scrollEl.scrollTo({
-    top: scrollEl.scrollTop + (targetTop - contTop) - stickyH,
-    behavior: 'smooth',
-  })
+  // We MUST use offsetTop traversal instead of getBoundingClientRect():
+  // getBoundingClientRect().top returns position relative to the VIEWPORT,
+  // which is wrong for elements that are scrolled off-screen (the delta comes
+  // out near-zero and the scroll "moves slightly then stops").
+  // offsetTop always gives the correct absolute offset inside the container.
+  const scrollEl = document.getElementById(ROOT_ID)?.parentElement
+  if (!scrollEl) { target.scrollIntoView({ block: 'center' }); return }
+
+  const stickyH = (document.getElementById(ROOT_ID)?.offsetHeight  ?? 46)
+               + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
+               + 10
+
+  let absoluteTop = 0
+  let el: HTMLElement | null = target
+  while (el && el !== scrollEl) {
+    absoluteTop += el.offsetTop
+    el = el.offsetParent as HTMLElement | null
+  }
+  // Instant scroll — smooth scroll gets interrupted by Angular zone re-renders.
+  // The CSS flash animation on the target provides visual feedback instead.
+  scrollEl.scrollTo({ top: Math.max(0, absoluteTop - stickyH) })
 }
 
 function pinSvg() {
@@ -198,20 +208,30 @@ function injectStyles() {
       background: rgba(229,198,20,.28); padding: 2px 7px; border-radius: 10px;
     }
 
-    /* ── Pin button on event rows ── */
-    .message-list__row--indented { position: relative; }
+    /* ── Pin button — LEFT of the event number, always visible when pinned ── */
+    .message-list__row--indented {
+      position: relative;
+      padding-left: 26px !important;  /* space for the pin icon */
+    }
     .${PIN_CLS} {
       display: none;
-      position: absolute; right: 30px; top: 50%; transform: translateY(-50%);
+      position: absolute; left: 3px; top: 50%; transform: translateY(-50%);
       background: none; border: none; cursor: pointer; padding: 4px;
-      border-radius: 5px; color: #9aa0a6; line-height: 0;
+      border-radius: 5px; line-height: 0;
+      color: rgba(0,0,0,.2);
       transition: color .12s, background .12s;
     }
-    .message-list__row--indented:hover .${PIN_CLS},
-    .${PIN_CLS}.${PIN_ON_CLS} { display: inline-flex; }
-    .${PIN_CLS}:hover         { color: #202124; background: rgba(0,0,0,.07); }
-    .${PIN_CLS}.${PIN_ON_CLS} { color: #c9ad07; }
-    .${HIGHLIGHT}             { box-shadow: inset 3px 0 0 #e5c614; }
+    .message-list__row--indented:hover .${PIN_CLS} { display: inline-flex; color: #9aa0a6; }
+    .${PIN_CLS}.${PIN_ON_CLS}  { display: inline-flex !important; color: #c9ad07; }
+    .${PIN_CLS}:hover          { color: #202124 !important; background: rgba(0,0,0,.07); }
+    .${HIGHLIGHT}              { box-shadow: inset 3px 0 0 #e5c614; }
+
+    /* ── Flash animation triggered by scrollToRow ── */
+    @keyframes amd-ta-flash-kf {
+      0%   { background-color: rgba(229,198,20,.5); }
+      100% { background-color: transparent; }
+    }
+    .amd-ta-flash { animation: amd-ta-flash-kf 1.1s ease-out forwards !important; }
 
     /* ── Pinned section — sticky below toolbar ── */
     #${PINNED_ID} {
@@ -238,23 +258,43 @@ function injectStyles() {
       border-radius: 8px !important;
       box-shadow: 0 1px 4px rgba(0,0,0,.1) !important;
       margin-bottom: 10px !important;
-      padding-top: 11px !important;
-      padding-bottom: 11px !important;
+      padding-top: 10px !important;
+      padding-bottom: 10px !important;
       min-height: 44px !important;
       cursor: pointer !important;
       transition: background .12s !important;
     }
     .amd-ta-clone:last-child { margin-bottom: 0 !important; }
     .amd-ta-clone:hover      { background: rgba(229,198,20,.22) !important; }
+
+    /* Event number: dark badge inside clone cards */
+    .amd-ta-clone .message-list__index,
+    .amd-ta-clone [class*="message-list__index"] {
+      display: inline-flex !important; align-items: center; justify-content: center;
+      background: #2c2c2a !important; color: #fff !important;
+      padding: 2px 6px !important; border-radius: 4px !important;
+      font-size: 11px !important; font-weight: 700 !important;
+      margin-right: 6px !important; min-width: 22px !important;
+      line-height: 1.4 !important; vertical-align: middle !important;
+    }
+    /* Event name: bold and clearly readable in clone cards */
+    .amd-ta-clone .message-list__title,
+    .amd-ta-clone [class*="message-list__title"] {
+      font-weight: 600 !important; color: #1a1a18 !important;
+    }
+    .amd-ta-clone .message-list__title span[title] {
+      font-size: 13px !important;
+    }
+
     .amd-ta-clone::after {
-      content: '↓ vai all\\'evento';
-      display: none; position: absolute; right: 52px; top: 50%; transform: translateY(-50%);
-      font-size: 10px; color: #7a6f1a; background: rgba(229,198,20,.28);
+      content: '↑ vai all\\'evento';
+      display: none; position: absolute; right: 46px; top: 50%; transform: translateY(-50%);
+      font-size: 10px; color: #7a6f1a; background: rgba(229,198,20,.32);
       padding: 2px 8px; border-radius: 8px; white-space: nowrap;
       pointer-events: none; font-family: system-ui, sans-serif;
     }
-    .amd-ta-clone:hover::after   { display: block; }
-    .amd-ta-clone .${PIN_CLS}    { display: inline-flex !important; color: #c9ad07; }
+    .amd-ta-clone:hover::after { display: block; }
+    .amd-ta-clone .${PIN_CLS}  { display: inline-flex !important; color: #c9ad07; }
     .amd-ta-placeholder {
       padding: 8px 4px; font-size: 12px; color: #9aa0a6;
       font-style: italic; font-family: system-ui, sans-serif;
@@ -355,11 +395,10 @@ function updatePinnedSection() {
           .find(r => evIndex(r) === key)
         if (!target) return
         scrollToRow(target)
-        // Flash the target row so it's obvious where we landed
-        target.style.transition = 'background .1s'
-        target.style.background = 'rgba(229,198,20,.45)'
-        setTimeout(() => { target.style.background = ''; target.style.transition = '' }, 900)
-        // NOTE: we do NOT call target.click() — it cancels the smooth scroll in Chrome.
+        // CSS class flash — adding a class doesn't trigger our childList observer
+        // and doesn't cause layout changes that could interrupt the scroll.
+        target.classList.add('amd-ta-flash')
+        setTimeout(() => target.classList.remove('amd-ta-flash'), 1100)
         // The user can click the row themselves once it's highlighted.
       })
 
