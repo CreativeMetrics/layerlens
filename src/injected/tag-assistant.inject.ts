@@ -235,12 +235,12 @@ function injectStyles() {
     .amd-ta-clone {
       background: rgba(229,198,20,.13) !important;
       border-left: 3px solid #e5c614 !important;
-      border-radius: 7px !important;
-      box-shadow: 0 1px 3px rgba(0,0,0,.08) !important;
-      margin-bottom: 6px !important;
-      padding-top: 9px !important;
-      padding-bottom: 9px !important;
-      min-height: 40px !important;
+      border-radius: 8px !important;
+      box-shadow: 0 1px 4px rgba(0,0,0,.1) !important;
+      margin-bottom: 10px !important;
+      padding-top: 11px !important;
+      padding-bottom: 11px !important;
+      min-height: 44px !important;
       cursor: pointer !important;
       transition: background .12s !important;
     }
