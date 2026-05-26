@@ -2,10 +2,11 @@
 // Features: event search, event pin, variable search.
 //
 // SCROLL STRATEGY FOR PINNED EVENTS
-// The real scroll container is .message-list__scrollpane (a *child* of .message-list,
-// NOT an ancestor). scrollAncestor() walks UP and misses it — it lands on the page's
-// main scroll container instead. We inject the toolbar directly into .message-list__scrollpane;
-// then ROOT_ID.parentElement === .message-list__scrollpane === the correct scrollEl.
+// The Tag Assistant sidebar uses overflow-y:'overlay' (Chrome/Angular Material).
+// scrollAncestor() now detects 'overlay' so it correctly finds the sidebar container
+// instead of walking past it to the main page. scrollToRow() uses scrollIntoView
+// + detects which ancestor actually scrolled → no dependency on knowing the
+// container type in advance.
 
 const ROOT_ID        = 'amd-ta-root'
 const PINNED_ID      = 'amd-ta-pinned'
@@ -118,7 +119,11 @@ function scrollAncestor(el: HTMLElement): HTMLElement {
   let p = el.parentElement
   while (p && p !== document.body) {
     const { overflowY } = getComputedStyle(p)
-    if (overflowY === 'auto' || overflowY === 'scroll') return p
+    // 'overlay' is a Chrome-specific deprecated value used by Angular Material
+    // sidebars — identical to 'auto' in behavior but getComputedStyle returns 'overlay'.
+    // Without this check scrollAncestor walks past the sidebar and lands on the
+    // main page scroll container, causing the page to scroll instead of the sidebar.
+    if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') return p
     p = p.parentElement
   }
   return el.parentElement ?? document.body
@@ -129,41 +134,45 @@ function evRows(): HTMLElement[] { return allMatches(ROW_SELECTORS) }
 /**
  * Scroll a list row into view, correctly accounting for our sticky headers.
  *
- * Strategy: getBoundingClientRect on both the scroll container and the target
- * gives viewport-relative positions that are always accurate, even when the
- * target is above or below the visible area. The delta between them tells us
- * exactly how much to adjust scrollTop. No offsetParent chain, no scrollIntoView
- * ancestor-resolution ambiguity.
+ * Root cause of ALL previous failures:
+ *   scrollAncestor() only checked overflow 'auto' | 'scroll'. The Tag Assistant
+ *   sidebar uses overflow-y:'overlay' (Chrome/Angular Material deprecated value).
+ *   scrollAncestor skipped it and landed on the MAIN PAGE container. Every
+ *   scrollTop operation scrolled the main page instead of the sidebar.
  *
- * Previous failures:
- *   v1 (getBoundingClientRect + smooth): smooth is async → got cancelled;
- *      target.click() also interrupted it; clones gave near-zero delta.
- *   v2 (offsetTop chain): offsetParent skips position:static ancestors →
- *      offset became relative to <body>, not scrollEl.
- *   v3 (scrollIntoView + scrollBy): scrollIntoView resolves to the nearest
- *      scrollable ancestor of the TARGET, which may differ from scrollEl if
- *      .message-list itself is overflow:auto; scrollBy then acts on the wrong el.
- *
- *   Now fixed: no smooth, no click(), clone filter in caller, explicit scrollEl.
+ * This function does NOT depend on knowing the scroll container in advance:
+ *   1. Snapshot scrollTop of every ancestor before calling scrollIntoView.
+ *   2. scrollIntoView({ block:'start', behavior:'instant' }) lets the BROWSER
+ *      find and scroll the correct container — it handles every overflow variant.
+ *   3. Walk the snapshots; the first ancestor whose scrollTop changed is the
+ *      real scroll container. Nudge it up by stickyH to clear our sticky toolbar.
  */
 function scrollToRow(target: HTMLElement) {
-  const root     = document.getElementById(ROOT_ID)
-  const scrollEl = root?.parentElement
-  if (!scrollEl) return
-
-  const stickyH = (root.offsetHeight ?? 46)
+  const root    = document.getElementById(ROOT_ID)
+  const stickyH = (root?.offsetHeight ?? 46)
                 + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
                 + 8
 
-  // getBoundingClientRect is always viewport-relative and accurate for
-  // off-screen elements (they simply have top < 0 or top > window.innerHeight).
-  // delta = distance from the container's visible top to where we want the row.
-  const containerTop = scrollEl.getBoundingClientRect().top
-  const targetTop    = target.getBoundingClientRect().top
-  const delta        = targetTop - containerTop - stickyH
+  // Snapshot every ancestor's scrollTop before the scroll.
+  type Snap = { el: HTMLElement; before: number }
+  const snaps: Snap[] = []
+  let cur: HTMLElement | null = target.parentElement
+  while (cur) {
+    snaps.push({ el: cur, before: cur.scrollTop })
+    cur = cur.parentElement as HTMLElement | null
+  }
 
-  // Instant (no behavior param) → synchronous, not cancellable.
-  scrollEl.scrollTop += delta
+  // Browser handles scroll container resolution — correct for auto/scroll/overlay.
+  target.scrollIntoView({ block: 'start', behavior: 'instant' })
+
+  // Find the element the browser actually scrolled; nudge it for sticky headers.
+  for (const { el, before } of snaps) {
+    if (el.scrollTop !== before) {
+      el.scrollTop -= stickyH
+      return
+    }
+  }
+  // If already visible (nothing scrolled), the flash animation still runs — fine.
 }
 
 function pinSvg() {
@@ -336,15 +345,12 @@ function injectToolbar() {
   if (document.getElementById(ROOT_ID)?.isConnected) return
   document.getElementById(ROOT_ID)?.remove()
 
-  // .message-list__scrollpane is the *real* scroll container (confirmed from DOM).
-  // It is a child of .message-list, so scrollAncestor() (which walks UP) misses it
-  // and ends up on the page's main scroll container — that's why every previous
-  // scrollTop attempt scrolled the main page instead of the sidebar.
-  //
-  // Injecting the toolbar here with position:sticky;top:0 makes it stick to the
-  // top of the scrollpane, and ROOT_ID.parentElement becomes the correct scrollEl.
-  const scrollpane = document.querySelector<HTMLElement>('.message-list__scrollpane')
-  if (!scrollpane) return
+  const list = listContainer()
+  if (!list) return
+  // scrollAncestor now detects overflow:'overlay' (Angular Material sidebar style)
+  // in addition to 'auto' and 'scroll'. Previously missing 'overlay' caused it to
+  // skip the sidebar and land on the main page container.
+  const scroll = scrollAncestor(list)
 
   const root = document.createElement('div')
   root.id = ROOT_ID
@@ -362,7 +368,7 @@ function injectToolbar() {
       <input type="search" id="amd-ta-search-input" placeholder="Cerca eventi…" autocomplete="off" spellcheck="false" />
       <span id="amd-ta-count" style="display:none"></span>
     </div>`
-  scrollpane.prepend(root)
+  scroll.prepend(root)
 
   document.getElementById('amd-ta-search-input')
     ?.addEventListener('input', (e) => {
