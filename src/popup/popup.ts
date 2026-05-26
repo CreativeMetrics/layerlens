@@ -173,6 +173,48 @@ let currentPageLabel = ''
 /** Whether the filter searches only the current page or the whole history. */
 let searchScope: 'page' | 'all' = 'page'
 
+/** Set to true after restoring session state so the next renderDataLayer call
+ *  (which fires immediately to refresh the current page) doesn't archive the
+ *  just-restored currentPushes as a brand-new history entry. */
+let skipNextArchive = false
+
+// ── Session-state persistence ─────────────────────────────────────────────────
+// chrome.storage.session survives popup close/reopen within the same browser
+// session, so pins and page history are preserved even though the popup is
+// destroyed every time the user clicks away from it.
+
+function saveSessionState() {
+  try {
+    void chrome.storage.session.set({
+      ll_pins: [...pinnedRaws],
+      ll_history: historyPages,
+      ll_current: currentPushes,
+      ll_visit: visitCounter,
+      ll_page_label: currentPageLabel,
+    })
+  } catch { /* session storage unavailable in this context */ }
+}
+
+async function loadSessionState() {
+  try {
+    const r = await chrome.storage.session.get([
+      'll_pins', 'll_history', 'll_current', 'll_visit', 'll_page_label',
+    ])
+    if (Array.isArray(r.ll_pins)) {
+      for (const s of r.ll_pins as string[]) pinnedRaws.add(s)
+    }
+    if (Array.isArray(r.ll_history)) historyPages = r.ll_history as PageRecord[]
+    if (Array.isArray(r.ll_current)) currentPushes = r.ll_current as unknown[]
+    if (typeof r.ll_visit === 'number') visitCounter = r.ll_visit
+    if (typeof r.ll_page_label === 'string') currentPageLabel = r.ll_page_label
+    // If any state was restored, skip archiving on the very next renderDataLayer
+    // so we don't double-add the current page to history when the popup reopens.
+    if (currentPushes.length > 0 || historyPages.length > 0 || pinnedRaws.size > 0) {
+      skipNextArchive = true
+    }
+  } catch { /* session storage unavailable */ }
+}
+
 // ── Core render ───────────────────────────────────────────────────────────────
 
 /** Full rebuild of the push list from stored state.
@@ -260,6 +302,7 @@ function togglePin(card: HTMLElement) {
   } else {
     pinnedRaws.add(raw)
   }
+  saveSessionState()
   rebuildPushList()
 }
 
@@ -308,9 +351,13 @@ function renderDataLayer(raw: string, name: string) {
   }
 
   // Archive the previous page before replacing currentPushes.
-  if (currentPushes.length > 0) {
+  // skipNextArchive is true when we just restored state from session storage
+  // (popup reopen) — the existing currentPushes already represent the current
+  // page and must NOT be double-added to history.
+  if (currentPushes.length > 0 && !skipNextArchive) {
     historyPages.unshift({ label: currentPageLabel, pushes: [...currentPushes] })
   }
+  skipNextArchive = false
   visitCounter++
   currentPageLabel = `Visita ${visitCounter}`
   currentPushes = [...pushes]  // oldest → newest
@@ -324,6 +371,7 @@ function renderDataLayer(raw: string, name: string) {
   const filterCount = $('dl-filter-count')
   if (filterCount) filterCount.style.display = 'none'
 
+  saveSessionState()
   main.setAttribute('hidden', '')
   view.removeAttribute('hidden')
   rebuildPushList()
@@ -430,11 +478,25 @@ function bindDataLayer() {
   // Ask the active tab for its containers on open.
   sendToActiveTab({ code: 'GET_GTM_ID' })
 
-  // Reopen the dataLayer view if that's where the user left off. chrome.storage
-  // .session persists across popup open/close (sessionStorage does not).
+  // Reopen the dataLayer view if that's where the user left off.
+  // If we restored session state, show the cached view immediately (fast), then
+  // also request a fresh snapshot — renderDataLayer will update it when it arrives.
   try {
     chrome.storage?.session?.get('amd_popup_view', (r) => {
-      if (r?.amd_popup_view === 'dl') sendToActiveTab({ code: 'GET_DATALAYER' })
+      if (r?.amd_popup_view !== 'dl') return
+      const hasCache = currentPushes.length > 0 || historyPages.length > 0 || pinnedRaws.size > 0
+      if (hasCache) {
+        const main = $('view-main')
+        const view = $('view-dl')
+        const title = $('dl-modal-title')
+        if (main && view) {
+          if (title) title.textContent = dataLayerName
+          main.setAttribute('hidden', '')
+          view.removeAttribute('hidden')
+          rebuildPushList()
+        }
+      }
+      sendToActiveTab({ code: 'GET_DATALAYER' })
     })
   } catch {
     /* ignore */
@@ -451,6 +513,9 @@ function stopLiveIfOn() {
 
 /* ---------- init ---------- */
 async function init() {
+  // Load persisted session state first so pins and history are ready before
+  // bindDataLayer sets up listeners and potentially triggers renderDataLayer.
+  await loadSessionState()
   await bindToggle('qol_changes')
   await bindToggle('block_page_change')
   bindSettings()
