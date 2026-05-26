@@ -180,11 +180,12 @@ function injectStyles() {
       position: sticky; top: 45px; z-index: 99;
       background: #fffdf0;
       border-bottom: 2px solid rgba(229,198,20,.5);
+      padding: 0 10px 10px;   /* lateral breathing room for the clone cards */
     }
     .amd-ta-pin-sep {
       display: flex; align-items: center; gap: 7px;
-      padding: 6px 10px 4px;
-      font-size: 10px; font-weight: 700; letter-spacing: .07em;
+      padding: 10px 2px 8px;  /* taller header */
+      font-size: 11px; font-weight: 700; letter-spacing: .07em;
       text-transform: uppercase; font-family: system-ui, sans-serif;
       color: #7a6f1a;
     }
@@ -195,16 +196,30 @@ function injectStyles() {
       background: #e5c614; border-radius: 2px;
     }
 
-    /* cloned pinned rows */
+    /* cloned pinned rows — card style with margin from edges */
     .amd-ta-clone {
       background: rgba(229,198,20,.13) !important;
       border-left: 3px solid #e5c614 !important;
-      box-shadow: none !important;
+      border-radius: 7px !important;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08) !important;
+      margin-bottom: 5px !important;
+      cursor: pointer !important;
+      transition: background .12s !important;
     }
-    .amd-ta-clone:hover { background: rgba(229,198,20,.2) !important; }
+    .amd-ta-clone:last-child { margin-bottom: 0 !important; }
+    .amd-ta-clone:hover { background: rgba(229,198,20,.22) !important; }
+    /* "jump to" hint on hover */
+    .amd-ta-clone::after {
+      content: '↓ vai all\'evento';
+      display: none; position: absolute; right: 52px; top: 50%; transform: translateY(-50%);
+      font-size: 10px; color: #7a6f1a; background: rgba(229,198,20,.25);
+      padding: 2px 7px; border-radius: 8px; white-space: nowrap;
+      pointer-events: none;
+    }
+    .amd-ta-clone:hover::after { display: block; }
     .amd-ta-clone .${PIN_CLS} { display: inline-flex !important; color: #c9ad07; }
     .amd-ta-placeholder {
-      padding: 7px 12px; font-size: 12px; color: #9aa0a6;
+      padding: 8px 4px; font-size: 12px; color: #9aa0a6;
       font-style: italic; font-family: system-ui, sans-serif;
     }
   `
@@ -264,13 +279,31 @@ function updatePinnedSection() {
 
   const rows = evRows()
   for (const name of pinnedNames) {
-    const original = [...rows].reverse().find(r => evName(r).toLowerCase() === name)
+    // rows are in DOM order (newest first in Tag Assistant) — find() gives most recent
+    const original = rows.find(r => evName(r).toLowerCase() === name)
     if (original) {
       const clone = original.cloneNode(true) as HTMLElement
       clone.classList.add('amd-ta-clone')
       clone.removeAttribute('data-amd-pin-added')
       clone.querySelectorAll(`.${PIN_CLS}`).forEach(b => b.remove())
       attachCloneUnpin(clone, name)
+
+      // Click the clone → scroll to the original event and select it
+      clone.addEventListener('click', (e) => {
+        // If the unpin button was clicked, let its own handler run
+        if ((e.target as HTMLElement).closest(`.${PIN_CLS}`)) return
+        e.preventDefault(); e.stopPropagation()
+        const target = evRows().find(r => evName(r).toLowerCase() === name)
+        if (!target) return
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        // Flash highlight so it's obvious which row we jumped to
+        target.style.transition = 'background .1s'
+        target.style.background = 'rgba(229,198,20,.4)'
+        setTimeout(() => { target.style.background = ''; target.style.transition = '' }, 700)
+        // Trigger native click to open event details in Tag Assistant
+        target.click()
+      })
+
       section.appendChild(clone)
     } else {
       const ph = document.createElement('div')
