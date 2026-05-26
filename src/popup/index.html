@@ -77,6 +77,11 @@
           </label>
           <button id="dl-export" class="icon-btn" title="Esporta tutti i push come JSON" aria-label="Esporta"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M7 11l5 5l5-5"/><path d="M12 4v12"/></svg></button>
         </div>
+        <div class="dl-filter">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;color:var(--muted)"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="search" id="dl-filter-input" placeholder="Cerca evento, chiave o valore…" autocomplete="off" spellcheck="false" />
+          <span class="dl-filter-count" id="dl-filter-count" style="display:none"></span>
+        </div>
         <div class="dl-body" id="dl-modal-body"></div>
       </div>
 
