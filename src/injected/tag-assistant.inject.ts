@@ -26,8 +26,13 @@ const PIN_CLS    = 'amd-ta-pin-btn'
 const PIN_ON_CLS = 'amd-ta-pin-on'
 const HIGHLIGHT  = 'amd-ta-hl'
 
-/** Lowercase event names the user has pinned. Module-level = survives Angular re-renders. */
-const pinnedNames = new Set<string>()
+/**
+ * Pin store: key = event index string (e.g. "26"), value = display name.
+ * Using the index (not just the name) lets us distinguish multiple events
+ * with the same name and navigate to the exact occurrence that was pinned.
+ * Module-level → survives Angular SPA re-renders.
+ */
+const pinnedItems = new Map<string, string>()  // key: evIndex, value: evName
 let filterText = ''
 
 // ── Selector discovery ───────────────────────────────────────────────────────
@@ -95,6 +100,14 @@ function evName(row: HTMLElement): string {
   )
 }
 
+/** The sequential index shown in the list (e.g. "26"). Unique per debug session. */
+function evIndex(row: HTMLElement): string {
+  return (
+    row.querySelector<HTMLElement>('.message-list__index, [class*="message-list__index"]')
+       ?.textContent?.trim() ?? ''
+  )
+}
+
 function listContainer(): HTMLElement | null {
   const direct = firstMatch(LIST_SELECTORS)
   if (direct) return direct
@@ -116,6 +129,25 @@ function scrollAncestor(el: HTMLElement): HTMLElement {
 
 function evRows(): HTMLElement[] {
   return allMatches(ROW_SELECTORS)
+}
+
+/**
+ * Scroll target row into view, accounting for our two sticky headers so the
+ * row is never hidden behind them. scrollIntoView alone isn't reliable here
+ * because it doesn't know about sticky children of the scroll container.
+ */
+function scrollToRow(target: HTMLElement) {
+  const scrollEl = scrollAncestor(target)
+  const stickyH = (document.getElementById(ROOT_ID)?.offsetHeight  ?? 45)
+                + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
+                + 8 // small gap
+  const targetTop = target.getBoundingClientRect().top
+  const contTop   = scrollEl.getBoundingClientRect().top
+  // Absolute position inside the scroll container, then subtract sticky height
+  scrollEl.scrollTo({
+    top: scrollEl.scrollTop + (targetTop - contTop) - stickyH,
+    behavior: 'smooth',
+  })
 }
 
 function escHtml(s: string) {
@@ -202,19 +234,22 @@ function injectStyles() {
       border-left: 3px solid #e5c614 !important;
       border-radius: 7px !important;
       box-shadow: 0 1px 3px rgba(0,0,0,.08) !important;
-      margin-bottom: 5px !important;
+      margin-bottom: 6px !important;
+      padding-top: 9px !important;
+      padding-bottom: 9px !important;
+      min-height: 40px !important;
       cursor: pointer !important;
       transition: background .12s !important;
     }
     .amd-ta-clone:last-child { margin-bottom: 0 !important; }
     .amd-ta-clone:hover { background: rgba(229,198,20,.22) !important; }
-    /* "jump to" hint on hover */
+    /* "jump to" badge visible on hover */
     .amd-ta-clone::after {
       content: '↓ vai all\'evento';
       display: none; position: absolute; right: 52px; top: 50%; transform: translateY(-50%);
-      font-size: 10px; color: #7a6f1a; background: rgba(229,198,20,.25);
-      padding: 2px 7px; border-radius: 8px; white-space: nowrap;
-      pointer-events: none;
+      font-size: 10px; color: #7a6f1a; background: rgba(229,198,20,.28);
+      padding: 2px 8px; border-radius: 8px; white-space: nowrap;
+      pointer-events: none; font-family: system-ui, sans-serif;
     }
     .amd-ta-clone:hover::after { display: block; }
     .amd-ta-clone .${PIN_CLS} { display: inline-flex !important; color: #c9ad07; }
@@ -258,7 +293,7 @@ function injectToolbar() {
 // ── Pinned section ───────────────────────────────────────────────────────────
 
 function updatePinnedSection() {
-  if (pinnedNames.size === 0) {
+  if (pinnedItems.size === 0) {
     document.getElementById(PINNED_ID)?.remove()
     return
   }
@@ -275,33 +310,32 @@ function updatePinnedSection() {
   }
 
   const section = document.getElementById(PINNED_ID)!
-  section.innerHTML = `<div class="amd-ta-pin-sep">Fissati&nbsp;<span style="font-weight:400;opacity:.7">(${pinnedNames.size})</span></div>`
+  section.innerHTML = `<div class="amd-ta-pin-sep">Fissati&nbsp;<span style="font-weight:400;opacity:.7">(${pinnedItems.size})</span></div>`
 
   const rows = evRows()
-  for (const name of pinnedNames) {
-    // rows are in DOM order (newest first in Tag Assistant) — find() gives most recent
-    const original = rows.find(r => evName(r).toLowerCase() === name)
+  for (const [key, name] of pinnedItems) {
+    // Find the exact event occurrence by its sequential index number
+    const original = rows.find(r => evIndex(r) === key)
     if (original) {
       const clone = original.cloneNode(true) as HTMLElement
       clone.classList.add('amd-ta-clone')
       clone.removeAttribute('data-amd-pin-added')
       clone.querySelectorAll(`.${PIN_CLS}`).forEach(b => b.remove())
-      attachCloneUnpin(clone, name)
+      attachCloneUnpin(clone, key)
 
-      // Click the clone → scroll to the original event and select it
+      // Click the clone → scroll to and select the exact original event
       clone.addEventListener('click', (e) => {
-        // If the unpin button was clicked, let its own handler run
         if ((e.target as HTMLElement).closest(`.${PIN_CLS}`)) return
         e.preventDefault(); e.stopPropagation()
-        const target = evRows().find(r => evName(r).toLowerCase() === name)
+        const target = evRows().find(r => evIndex(r) === key)
         if (!target) return
-        target.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        // Flash highlight so it's obvious which row we jumped to
+        scrollToRow(target)
+        // Flash the target so it's clear where we landed
         target.style.transition = 'background .1s'
-        target.style.background = 'rgba(229,198,20,.4)'
-        setTimeout(() => { target.style.background = ''; target.style.transition = '' }, 700)
-        // Trigger native click to open event details in Tag Assistant
-        target.click()
+        target.style.background = 'rgba(229,198,20,.45)'
+        setTimeout(() => { target.style.background = ''; target.style.transition = '' }, 800)
+        // Open event details in Tag Assistant (slight delay so scroll starts first)
+        setTimeout(() => target.click(), 120)
       })
 
       section.appendChild(clone)
@@ -314,7 +348,7 @@ function updatePinnedSection() {
   }
 }
 
-function attachCloneUnpin(row: HTMLElement, name: string) {
+function attachCloneUnpin(row: HTMLElement, key: string) {
   const btn = document.createElement('button')
   btn.type = 'button'
   btn.className = `${PIN_CLS} ${PIN_ON_CLS}`
@@ -323,15 +357,16 @@ function attachCloneUnpin(row: HTMLElement, name: string) {
   btn.innerHTML = pinSvg()
   btn.addEventListener('click', (e) => {
     e.stopPropagation(); e.preventDefault()
-    unpinByName(name)
+    unpinByKey(key)
   })
   row.appendChild(btn)
 }
 
-function unpinByName(name: string) {
-  pinnedNames.delete(name)
+/** Remove a pin by its event-index key. Only the exact occurrence is affected. */
+function unpinByKey(key: string) {
+  pinnedItems.delete(key)
   evRows()
-    .filter(r => evName(r).toLowerCase() === name)
+    .filter(r => evIndex(r) === key)
     .forEach(r => {
       r.classList.remove(HIGHLIGHT)
       const b = r.querySelector<HTMLButtonElement>(`.${PIN_CLS}`)
@@ -385,8 +420,9 @@ function addPinButtons(rows: HTMLElement[]) {
     if (row.dataset.amdPinAdded) continue
     row.dataset.amdPinAdded = '1'
 
-    const name = evName(row).toLowerCase()
-    const pinned = pinnedNames.has(name)
+    const key    = evIndex(row)   // unique index for this occurrence
+    const name   = evName(row)    // display name
+    const pinned = pinnedItems.has(key)
     if (pinned) row.classList.add(HIGHLIGHT)
 
     const btn = document.createElement('button')
@@ -398,20 +434,17 @@ function addPinButtons(rows: HTMLElement[]) {
 
     btn.addEventListener('click', (e) => {
       e.stopPropagation(); e.preventDefault()
-      const nowPinned = !pinnedNames.has(name)
-      if (nowPinned) { pinnedNames.add(name) } else { pinnedNames.delete(name) }
-      // Sync ALL rows with the same event name (they may appear in multiple pages).
-      evRows()
-        .filter(r => evName(r).toLowerCase() === name)
-        .forEach(r => {
-          r.classList.toggle(HIGHLIGHT, nowPinned)
-          const b = r.querySelector<HTMLButtonElement>(`.${PIN_CLS}`)
-          if (b) {
-            b.classList.toggle(PIN_ON_CLS, nowPinned)
-            b.title = nowPinned ? 'Rimuovi dai fissati' : 'Fissa in cima'
-            b.setAttribute('aria-pressed', String(nowPinned))
-          }
-        })
+      const nowPinned = !pinnedItems.has(key)
+      if (nowPinned) {
+        pinnedItems.set(key, name)
+        row.classList.add(HIGHLIGHT)
+        btn.classList.add(PIN_ON_CLS)
+        btn.title = 'Rimuovi dai fissati'
+        btn.setAttribute('aria-pressed', 'true')
+      } else {
+        unpinByKey(key)
+        return  // unpinByKey already calls updatePinnedSection
+      }
       updatePinnedSection()
     })
 
