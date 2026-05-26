@@ -1,51 +1,39 @@
 // Runs in the PAGE world on tagassistant.google.com
-// Adds a search bar and event-pin feature to the GTM debug event list.
+// Features: event search, event pin, variable search.
 //
-// SELECTOR DISCOVERY STRATEGY
-// Rather than hardcoding a single CSS selector (which breaks whenever Google
-// renames classes), we use a three-tier approach:
-//   1. BEM block selector (.message-list) — stable as long as the naming convention holds.
-//   2. Fallback via parentElement traversal from a known __element selector.
-//   3. Runtime discovery: at startup we scan the DOM and log candidates to the
-//      console so that updating selectors is a one-line change, not a DOM safari.
-//
-// POSITIONING STRATEGY
-// Inserting the toolbar "before" the list container (beforebegin) only works
-// if the insertion point is static. In Angular SPAs the list is rebuilt on
-// every route change, so "beforebegin" nodes end up in the middle.
-//
-// Fix: walk up to the SCROLL CONTAINER (first ancestor with overflow:auto/scroll)
-// and prepend() the toolbar there. The scroll container is always present and
-// unmanaged by Angular, so prepend is permanent. With position:sticky;top:0 the
-// toolbar stays pinned to the top of the scroll area regardless of list rebuilds.
+// SCROLL STRATEGY FOR PINNED EVENTS
+// scrollToRow() uses the toolbar's own parentElement as the scroll container
+// (we prepended the toolbar there, so we know it's correct). Walking up from
+// a target row with scrollAncestor() can land on the wrong node in some layouts.
 
-const ROOT_ID    = 'amd-ta-root'
-const PINNED_ID  = 'amd-ta-pinned'
-const HIDDEN_CLS = 'amd-ta-hidden'
-const PIN_CLS    = 'amd-ta-pin-btn'
-const PIN_ON_CLS = 'amd-ta-pin-on'
-const HIGHLIGHT  = 'amd-ta-hl'
+const ROOT_ID        = 'amd-ta-root'
+const PINNED_ID      = 'amd-ta-pinned'
+const VAR_ROOT_ID    = 'amd-ta-var-root'
+const HIDDEN_CLS     = 'amd-ta-hidden'
+const VAR_HIDDEN_CLS = 'amd-ta-var-hidden'
+const PIN_CLS        = 'amd-ta-pin-btn'
+const PIN_ON_CLS     = 'amd-ta-pin-on'
+const HIGHLIGHT      = 'amd-ta-hl'
 
 /**
  * Pin store: key = event index string (e.g. "26"), value = display name.
- * Using the index (not just the name) lets us distinguish multiple events
- * with the same name and navigate to the exact occurrence that was pinned.
+ * Index-based pinning distinguishes multiple events with the same name.
  * Module-level → survives Angular SPA re-renders.
  */
-const pinnedItems = new Map<string, string>()  // key: evIndex, value: evName
-let filterText = ''
+const pinnedItems = new Map<string, string>()
+let filterText    = ''
+let varFilterText = ''
 
-// ── Selector discovery ───────────────────────────────────────────────────────
+// ── Selectors ────────────────────────────────────────────────────────────────
 
-/** Candidates in priority order. First match wins. */
 const LIST_SELECTORS = [
-  '.message-list',                          // BEM block (most stable)
-  '[class*="message-list"]',                // substring match (fallback)
-  '.messages-panel',                        // alternative naming
+  '.message-list',
+  '[class*="message-list"]',
+  '.messages-panel',
 ]
 
 const ROW_SELECTORS = [
-  '.message-list__row--indented',           // confirmed from DOM inspection
+  '.message-list__row--indented',
   '[class*="message-list__row"][class*="indented"]',
   '[class*="message-list__row--indented"]',
 ]
@@ -55,25 +43,22 @@ const SEP_SELECTORS = [
   '[class*="message-list__row"]:not([class*="indented"])',
 ]
 
-/** Runs once at startup; logs available selectors to the console so updating
- *  them later is trivial ("search for amd-ta-discovery in DevTools"). */
-function discoverAndLog() {
-  const results: string[] = []
+// Variables tab — broad fallbacks; discovery logs the winner at runtime.
+const VAR_CONTAINER_SELECTORS = [
+  '.variable-list',
+  '[class*="variable-list"]',
+  'ctui-variable-list',
+  '[class*="variables-panel"]',
+]
 
-  for (const sel of LIST_SELECTORS) {
-    const n = document.querySelectorAll(sel).length
-    if (n) results.push(`list container: "${sel}" (${n} found)`)
-  }
-  for (const sel of ROW_SELECTORS) {
-    const n = document.querySelectorAll(sel).length
-    if (n) results.push(`event row: "${sel}" (${n} found)`)
-  }
-  if (results.length) {
-    console.groupCollapsed('[LayerLens] Tag Assistant selector discovery')
-    results.forEach(r => console.log(r))
-    console.groupEnd()
-  }
-}
+const VAR_ROW_SELECTORS = [
+  '.variable-list__row',
+  '[class*="variable-list__row"]',
+  '[class*="variable-list"] tr',
+  '[class*="variable-list"] li',
+]
+
+// ── Selector helpers ──────────────────────────────────────────────────────────
 
 function firstMatch(selectors: string[], root: ParentNode = document): HTMLElement | null {
   for (const sel of selectors) {
@@ -91,7 +76,27 @@ function allMatches(selectors: string[], root: ParentNode = document): HTMLEleme
   return []
 }
 
-// ── DOM helpers ──────────────────────────────────────────────────────────────
+/** Logs matching selectors at startup so future updates are trivial. */
+function discoverAndLog() {
+  const out: string[] = []
+  const check = (label: string, list: string[]) => {
+    for (const sel of list) {
+      const n = document.querySelectorAll(sel).length
+      if (n) out.push(`${label}: "${sel}" (${n})`)
+    }
+  }
+  check('event list',   LIST_SELECTORS)
+  check('event row',    ROW_SELECTORS)
+  check('var container', VAR_CONTAINER_SELECTORS)
+  check('var row',      VAR_ROW_SELECTORS)
+  if (out.length) {
+    console.groupCollapsed('[LayerLens] Tag Assistant selector discovery')
+    out.forEach(r => console.log(r))
+    console.groupEnd()
+  }
+}
+
+// ── DOM helpers ───────────────────────────────────────────────────────────────
 
 function evName(row: HTMLElement): string {
   return (
@@ -100,7 +105,6 @@ function evName(row: HTMLElement): string {
   )
 }
 
-/** The sequential index shown in the list (e.g. "26"). Unique per debug session. */
 function evIndex(row: HTMLElement): string {
   return (
     row.querySelector<HTMLElement>('.message-list__index, [class*="message-list__index"]')
@@ -111,12 +115,9 @@ function evIndex(row: HTMLElement): string {
 function listContainer(): HTMLElement | null {
   const direct = firstMatch(LIST_SELECTORS)
   if (direct) return direct
-  // Fallback: parent of first event row
   return firstMatch(ROW_SELECTORS)?.parentElement ?? null
 }
 
-/** Walk up to the first scrollable ancestor. This element is stable across
- *  Angular SPA route changes — a safe permanent insertion point. */
 function scrollAncestor(el: HTMLElement): HTMLElement {
   let p = el.parentElement
   while (p && p !== document.body) {
@@ -127,59 +128,69 @@ function scrollAncestor(el: HTMLElement): HTMLElement {
   return el.parentElement ?? document.body
 }
 
-function evRows(): HTMLElement[] {
-  return allMatches(ROW_SELECTORS)
-}
+function evRows(): HTMLElement[] { return allMatches(ROW_SELECTORS) }
 
 /**
- * Scroll target row into view, accounting for our two sticky headers so the
- * row is never hidden behind them. scrollIntoView alone isn't reliable here
- * because it doesn't know about sticky children of the scroll container.
+ * Scroll a list row into view, correctly accounting for our sticky headers.
+ * We use the toolbar's parentElement as the scroll container — it's guaranteed
+ * correct because we prepended the toolbar there ourselves.
+ * Removing target.click() here: it was cancelling the smooth scroll in Chrome.
  */
 function scrollToRow(target: HTMLElement) {
-  const scrollEl = scrollAncestor(target)
-  const stickyH = (document.getElementById(ROOT_ID)?.offsetHeight  ?? 45)
-                + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
-                + 8 // small gap
+  // The scroll container is the direct parent of our toolbar.
+  const scrollEl = document.getElementById(ROOT_ID)?.parentElement ?? scrollAncestor(target)
+  const stickyH  = (document.getElementById(ROOT_ID)?.offsetHeight  ?? 46)
+                 + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
+                 + 10
   const targetTop = target.getBoundingClientRect().top
   const contTop   = scrollEl.getBoundingClientRect().top
-  // Absolute position inside the scroll container, then subtract sticky height
   scrollEl.scrollTo({
     top: scrollEl.scrollTop + (targetTop - contTop) - stickyH,
     behavior: 'smooth',
   })
 }
 
-function escHtml(s: string) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
 function pinSvg() {
   return `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4"/><path d="M9 15l-4.5 4.5"/><path d="M14.5 4l5.5 5.5"/></svg>`
 }
 
-// ── Styles ───────────────────────────────────────────────────────────────────
+function searchSvg(size = 14) {
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>`
+}
+
+// ── Styles ────────────────────────────────────────────────────────────────────
 
 function injectStyles() {
   if (document.getElementById('amd-ta-style')) return
   const s = document.createElement('style')
   s.id = 'amd-ta-style'
   s.textContent = `
-    .${HIDDEN_CLS} { display: none !important; }
+    .${HIDDEN_CLS}     { display: none !important; }
+    .${VAR_HIDDEN_CLS} { display: none !important; }
 
-    /* ── Toolbar ── sticky top, brand-tinted so it's clearly "LayerLens" */
+    /* ── Brand badge ── */
+    .amd-ta-brand {
+      display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+      background: #e5c614; color: #2c2c2a;
+      border-radius: 7px; padding: 4px 9px 4px 7px;
+      font: 700 11px/1 system-ui, sans-serif; letter-spacing: .02em;
+      white-space: nowrap; user-select: none;
+    }
+    .amd-ta-brand svg { flex-shrink: 0; }
+
+    /* ── Toolbar — sticky top ── */
     #${ROOT_ID} {
       position: sticky; top: 0; z-index: 100;
       display: flex; align-items: center; gap: 8px;
-      padding: 8px 10px;
+      padding: 7px 10px;
       background: #fffdf0;
       border-bottom: 2px solid #e5c614;
       font: 13px/1.4 system-ui, Roboto, Arial, sans-serif;
     }
     .amd-ta-searchbox {
       display: flex; align-items: center; gap: 7px; flex: 1;
-      background: rgba(255,255,255,.75); border-radius: 8px; padding: 6px 10px;
-      border: 1px solid rgba(229,198,20,.45);
+      background: rgba(255,255,255,.8); border-radius: 8px; padding: 5px 10px;
+      border: 1px solid rgba(229,198,20,.5);
     }
     .amd-ta-searchbox svg { flex-shrink: 0; color: #9aa0a6; }
     .amd-ta-searchbox input {
@@ -189,10 +200,10 @@ function injectStyles() {
     .amd-ta-searchbox input::-webkit-search-cancel-button { -webkit-appearance: none; }
     #amd-ta-count {
       font-size: 11px; color: #7a6f1a; flex-shrink: 0; white-space: nowrap;
-      background: rgba(229,198,20,.25); padding: 2px 7px; border-radius: 10px;
+      background: rgba(229,198,20,.28); padding: 2px 7px; border-radius: 10px;
     }
 
-    /* ── Pin button on each event row ── */
+    /* ── Pin button on event rows ── */
     .message-list__row--indented { position: relative; }
     .${PIN_CLS} {
       display: none;
@@ -203,32 +214,29 @@ function injectStyles() {
     }
     .message-list__row--indented:hover .${PIN_CLS},
     .${PIN_CLS}.${PIN_ON_CLS} { display: inline-flex; }
-    .${PIN_CLS}:hover { color: #202124; background: rgba(0,0,0,.07); }
+    .${PIN_CLS}:hover         { color: #202124; background: rgba(0,0,0,.07); }
     .${PIN_CLS}.${PIN_ON_CLS} { color: #c9ad07; }
-    .${HIGHLIGHT} { box-shadow: inset 3px 0 0 #e5c614; }
+    .${HIGHLIGHT}             { box-shadow: inset 3px 0 0 #e5c614; }
 
-    /* ── Pinned section — sticky below toolbar, clearly branded ── */
+    /* ── Pinned section — sticky below toolbar ── */
     #${PINNED_ID} {
-      position: sticky; top: 45px; z-index: 99;
+      position: sticky; top: 46px; z-index: 99;
       background: #fffdf0;
       border-bottom: 2px solid rgba(229,198,20,.5);
-      padding: 0 10px 10px;   /* lateral breathing room for the clone cards */
+      padding: 0 10px 10px;
     }
     .amd-ta-pin-sep {
       display: flex; align-items: center; gap: 7px;
-      padding: 10px 2px 8px;  /* taller header */
+      padding: 10px 2px 8px;
       font-size: 11px; font-weight: 700; letter-spacing: .07em;
-      text-transform: uppercase; font-family: system-ui, sans-serif;
-      color: #7a6f1a;
+      text-transform: uppercase; font-family: system-ui, sans-serif; color: #7a6f1a;
     }
-    /* small pin icon before the label */
     .amd-ta-pin-sep::before {
-      content: '';
-      display: inline-block; width: 10px; height: 10px; flex-shrink: 0;
+      content: ''; display: inline-block; width: 10px; height: 10px; flex-shrink: 0;
       background: #e5c614; border-radius: 2px;
     }
 
-    /* cloned pinned rows — card style with margin from edges */
+    /* ── Pinned clone cards ── */
     .amd-ta-clone {
       background: rgba(229,198,20,.13) !important;
       border-left: 3px solid #e5c614 !important;
@@ -242,29 +250,43 @@ function injectStyles() {
       transition: background .12s !important;
     }
     .amd-ta-clone:last-child { margin-bottom: 0 !important; }
-    .amd-ta-clone:hover { background: rgba(229,198,20,.22) !important; }
-    /* "jump to" badge visible on hover */
+    .amd-ta-clone:hover      { background: rgba(229,198,20,.22) !important; }
     .amd-ta-clone::after {
-      content: '↓ vai all\'evento';
+      content: '↓ vai all\\'evento';
       display: none; position: absolute; right: 52px; top: 50%; transform: translateY(-50%);
       font-size: 10px; color: #7a6f1a; background: rgba(229,198,20,.28);
       padding: 2px 8px; border-radius: 8px; white-space: nowrap;
       pointer-events: none; font-family: system-ui, sans-serif;
     }
-    .amd-ta-clone:hover::after { display: block; }
-    .amd-ta-clone .${PIN_CLS} { display: inline-flex !important; color: #c9ad07; }
+    .amd-ta-clone:hover::after   { display: block; }
+    .amd-ta-clone .${PIN_CLS}    { display: inline-flex !important; color: #c9ad07; }
     .amd-ta-placeholder {
       padding: 8px 4px; font-size: 12px; color: #9aa0a6;
       font-style: italic; font-family: system-ui, sans-serif;
+    }
+
+    /* ── Variables search bar ── */
+    #${VAR_ROOT_ID} {
+      display: flex; align-items: center; gap: 7px;
+      padding: 7px 10px;
+      background: #fffdf0;
+      border-bottom: 2px solid #e5c614;
+      font: 13px/1.4 system-ui, Roboto, Arial, sans-serif;
+      position: sticky; top: 0; z-index: 50;
+    }
+    #${VAR_ROOT_ID} .amd-ta-brand { font-size: 10px; padding: 3px 7px 3px 6px; }
+    #${VAR_ROOT_ID} .amd-ta-searchbox { background: rgba(255,255,255,.8); border: 1px solid rgba(229,198,20,.5); }
+    #amd-ta-var-count {
+      font-size: 11px; color: #7a6f1a; flex-shrink: 0; white-space: nowrap;
+      background: rgba(229,198,20,.28); padding: 2px 7px; border-radius: 10px;
     }
   `
   document.head.appendChild(s)
 }
 
-// ── Toolbar ──────────────────────────────────────────────────────────────────
+// ── Toolbar (event list) ──────────────────────────────────────────────────────
 
 function injectToolbar() {
-  // Re-inject if disconnected (Angular may have rebuilt the scroll container).
   if (document.getElementById(ROOT_ID)?.isConnected) return
   document.getElementById(ROOT_ID)?.remove()
 
@@ -275,12 +297,19 @@ function injectToolbar() {
   const root = document.createElement('div')
   root.id = ROOT_ID
   root.innerHTML = `
+    <div class="amd-ta-brand">
+      <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+        <circle cx="10" cy="10" r="9" fill="#2c2c2a"/>
+        <circle cx="10" cy="10" r="5" fill="none" stroke="#e5c614" stroke-width="2"/>
+        <circle cx="12.8" cy="7.2" r="1.6" fill="#e5c614"/>
+      </svg>
+      LayerLens
+    </div>
     <div class="amd-ta-searchbox">
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      ${searchSvg(14)}
       <input type="search" id="amd-ta-search-input" placeholder="Cerca eventi…" autocomplete="off" spellcheck="false" />
       <span id="amd-ta-count" style="display:none"></span>
     </div>`
-  // prepend inside the scroll container so sticky:top works correctly
   scroll.prepend(root)
 
   document.getElementById('amd-ta-search-input')
@@ -290,7 +319,7 @@ function injectToolbar() {
     })
 }
 
-// ── Pinned section ───────────────────────────────────────────────────────────
+// ── Pinned section ────────────────────────────────────────────────────────────
 
 function updatePinnedSection() {
   if (pinnedItems.size === 0) {
@@ -298,12 +327,10 @@ function updatePinnedSection() {
     return
   }
 
-  // Re-create if disconnected (e.g. after Angular re-render).
   if (!document.getElementById(PINNED_ID)?.isConnected) {
     document.getElementById(PINNED_ID)?.remove()
     const toolbar = document.getElementById(ROOT_ID)
-    if (!toolbar?.isConnected) return  // toolbar not ready yet
-
+    if (!toolbar?.isConnected) return
     const section = document.createElement('div')
     section.id = PINNED_ID
     toolbar.insertAdjacentElement('afterend', section)
@@ -314,7 +341,6 @@ function updatePinnedSection() {
 
   const rows = evRows()
   for (const [key, name] of pinnedItems) {
-    // Find the exact event occurrence by its sequential index number
     const original = rows.find(r => evIndex(r) === key)
     if (original) {
       const clone = original.cloneNode(true) as HTMLElement
@@ -323,19 +349,18 @@ function updatePinnedSection() {
       clone.querySelectorAll(`.${PIN_CLS}`).forEach(b => b.remove())
       attachCloneUnpin(clone, key)
 
-      // Click the clone → scroll to and select the exact original event
       clone.addEventListener('click', (e) => {
         if ((e.target as HTMLElement).closest(`.${PIN_CLS}`)) return
         e.preventDefault(); e.stopPropagation()
         const target = evRows().find(r => evIndex(r) === key)
         if (!target) return
         scrollToRow(target)
-        // Flash the target so it's clear where we landed
+        // Flash the target row so it's obvious where we landed
         target.style.transition = 'background .1s'
         target.style.background = 'rgba(229,198,20,.45)'
-        setTimeout(() => { target.style.background = ''; target.style.transition = '' }, 800)
-        // Open event details in Tag Assistant (slight delay so scroll starts first)
-        setTimeout(() => target.click(), 120)
+        setTimeout(() => { target.style.background = ''; target.style.transition = '' }, 900)
+        // NOTE: we do NOT call target.click() — it cancels the smooth scroll in Chrome.
+        // The user can click the row themselves once it's highlighted.
       })
 
       section.appendChild(clone)
@@ -362,7 +387,6 @@ function attachCloneUnpin(row: HTMLElement, key: string) {
   row.appendChild(btn)
 }
 
-/** Remove a pin by its event-index key. Only the exact occurrence is affected. */
 function unpinByKey(key: string) {
   pinnedItems.delete(key)
   evRows()
@@ -379,7 +403,7 @@ function unpinByKey(key: string) {
   updatePinnedSection()
 }
 
-// ── Filter ───────────────────────────────────────────────────────────────────
+// ── Event filter ──────────────────────────────────────────────────────────────
 
 function applyFilter(rows: HTMLElement[]) {
   let visible = 0
@@ -389,7 +413,6 @@ function applyFilter(rows: HTMLElement[]) {
     if (match) visible++
   }
 
-  // Hide page-separator rows whose events are all filtered out.
   const seps = allMatches(SEP_SELECTORS)
   for (const sep of seps) {
     if (!filterText) { sep.classList.remove(HIDDEN_CLS); continue }
@@ -413,15 +436,15 @@ function applyFilter(rows: HTMLElement[]) {
   }
 }
 
-// ── Pin buttons ──────────────────────────────────────────────────────────────
+// ── Pin buttons ───────────────────────────────────────────────────────────────
 
 function addPinButtons(rows: HTMLElement[]) {
   for (const row of rows) {
     if (row.dataset.amdPinAdded) continue
     row.dataset.amdPinAdded = '1'
 
-    const key    = evIndex(row)   // unique index for this occurrence
-    const name   = evName(row)    // display name
+    const key    = evIndex(row)
+    const name   = evName(row)
     const pinned = pinnedItems.has(key)
     if (pinned) row.classList.add(HIGHLIGHT)
 
@@ -443,7 +466,7 @@ function addPinButtons(rows: HTMLElement[]) {
         btn.setAttribute('aria-pressed', 'true')
       } else {
         unpinByKey(key)
-        return  // unpinByKey already calls updatePinnedSection
+        return
       }
       updatePinnedSection()
     })
@@ -452,28 +475,112 @@ function addPinButtons(rows: HTMLElement[]) {
   }
 }
 
-// ── Main sync ────────────────────────────────────────────────────────────────
+// ── Variables search ──────────────────────────────────────────────────────────
 
-/** Idempotent: safe on every Angular re-render.
- *  The toolbar re-injects itself if disconnected (SPA route change). */
+function varContainer(): HTMLElement | null {
+  return firstMatch(VAR_CONTAINER_SELECTORS)
+}
+
+function varRows(container: HTMLElement): HTMLElement[] {
+  return allMatches(VAR_ROW_SELECTORS, container)
+}
+
+function injectVarSearch() {
+  const container = varContainer()
+
+  // Container gone or invisible → clean up and return
+  if (!container) {
+    document.getElementById(VAR_ROOT_ID)?.remove()
+    return
+  }
+
+  // Already injected and connected → just re-apply filter
+  if (document.getElementById(VAR_ROOT_ID)?.isConnected) {
+    applyVarFilter(container)
+    return
+  }
+
+  document.getElementById(VAR_ROOT_ID)?.remove()
+
+  // Insert our bar just before the variable list container
+  const root = document.createElement('div')
+  root.id = VAR_ROOT_ID
+  root.innerHTML = `
+    <div class="amd-ta-brand" style="font-size:10px;padding:3px 7px 3px 6px">
+      <svg viewBox="0 0 20 20" width="13" height="13" aria-hidden="true">
+        <circle cx="10" cy="10" r="9" fill="#2c2c2a"/>
+        <circle cx="10" cy="10" r="5" fill="none" stroke="#e5c614" stroke-width="2"/>
+        <circle cx="12.8" cy="7.2" r="1.6" fill="#e5c614"/>
+      </svg>
+      LayerLens
+    </div>
+    <div class="amd-ta-searchbox">
+      ${searchSvg(13)}
+      <input type="search" id="amd-ta-var-input" placeholder="Filtra variabili…" autocomplete="off" spellcheck="false" />
+      <span id="amd-ta-var-count" style="display:none"></span>
+    </div>`
+
+  // Try to prepend inside the variable scroll container; fallback to before the container
+  const varScroll = scrollAncestor(container)
+  if (varScroll && varScroll !== document.body && varScroll !== container) {
+    varScroll.prepend(root)
+  } else {
+    container.parentElement?.insertBefore(root, container)
+  }
+
+  document.getElementById('amd-ta-var-input')
+    ?.addEventListener('input', (e) => {
+      varFilterText = (e.target as HTMLInputElement).value.toLowerCase().trim()
+      const c = varContainer()
+      if (c) applyVarFilter(c)
+    })
+}
+
+function applyVarFilter(container: HTMLElement) {
+  const rows = varRows(container)
+  let visible = 0
+  for (const row of rows) {
+    const text = row.textContent?.toLowerCase() ?? ''
+    const match = !varFilterText || text.includes(varFilterText)
+    row.classList.toggle(VAR_HIDDEN_CLS, !match)
+    if (match) visible++
+  }
+  const countEl = document.getElementById('amd-ta-var-count')
+  if (countEl) {
+    if (varFilterText && rows.length > 0) {
+      countEl.textContent = `${visible} / ${rows.length}`
+      countEl.style.display = ''
+    } else {
+      countEl.style.display = 'none'
+    }
+  }
+}
+
+// ── Main sync ─────────────────────────────────────────────────────────────────
+
+/** Idempotent: safe on every Angular re-render. */
 function sync() {
-  if (!firstMatch(ROW_SELECTORS)) return
   injectStyles()
-  injectToolbar()
-  const rows = evRows()
-  addPinButtons(rows)
-  applyFilter(rows)
-  // Update pinned section in the next frame so clones come from fresh rows.
-  requestAnimationFrame(updatePinnedSection)
+
+  // Event list panel
+  if (firstMatch(ROW_SELECTORS)) {
+    injectToolbar()
+    const rows = evRows()
+    addPinButtons(rows)
+    applyFilter(rows)
+    requestAnimationFrame(updatePinnedSection)
+  }
+
+  // Variables tab panel (independent injection point)
+  injectVarSearch()
 }
 
 let scheduled = false
 let discovered = false
 const observer = new MutationObserver((muts) => {
-  // Ignore mutations that originate inside our own injected nodes.
   const ours = muts.every((m) => {
     const t = m.target as HTMLElement
-    return !!t.closest?.(`#${ROOT_ID}, #${PINNED_ID}, #amd-ta-style`)
+    return !!t.closest?.(`#${ROOT_ID}, #${PINNED_ID}, #${VAR_ROOT_ID}, #amd-ta-style`)
   })
   if (ours || scheduled) return
   scheduled = true
