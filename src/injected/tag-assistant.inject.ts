@@ -135,17 +135,19 @@ function injectStyles() {
   s.textContent = `
     .${HIDDEN_CLS} { display: none !important; }
 
-    /* toolbar: sticky top inside the scroll container */
+    /* ── Toolbar ── sticky top, brand-tinted so it's clearly "LayerLens" */
     #${ROOT_ID} {
       position: sticky; top: 0; z-index: 100;
       display: flex; align-items: center; gap: 8px;
       padding: 8px 10px;
-      background: #fff; border-bottom: 1px solid rgba(0,0,0,.1);
+      background: #fffdf0;
+      border-bottom: 2px solid #e5c614;
       font: 13px/1.4 system-ui, Roboto, Arial, sans-serif;
     }
     .amd-ta-searchbox {
       display: flex; align-items: center; gap: 7px; flex: 1;
-      background: #f1f3f4; border-radius: 8px; padding: 6px 10px;
+      background: rgba(255,255,255,.75); border-radius: 8px; padding: 6px 10px;
+      border: 1px solid rgba(229,198,20,.45);
     }
     .amd-ta-searchbox svg { flex-shrink: 0; color: #9aa0a6; }
     .amd-ta-searchbox input {
@@ -153,9 +155,12 @@ function injectStyles() {
       font: inherit; color: #202124;
     }
     .amd-ta-searchbox input::-webkit-search-cancel-button { -webkit-appearance: none; }
-    #amd-ta-count { font-size: 11px; color: #5f6368; flex-shrink: 0; white-space: nowrap; }
+    #amd-ta-count {
+      font-size: 11px; color: #7a6f1a; flex-shrink: 0; white-space: nowrap;
+      background: rgba(229,198,20,.25); padding: 2px 7px; border-radius: 10px;
+    }
 
-    /* pin button on each event row */
+    /* ── Pin button on each event row ── */
     .message-list__row--indented { position: relative; }
     .${PIN_CLS} {
       display: none;
@@ -167,26 +172,39 @@ function injectStyles() {
     .message-list__row--indented:hover .${PIN_CLS},
     .${PIN_CLS}.${PIN_ON_CLS} { display: inline-flex; }
     .${PIN_CLS}:hover { color: #202124; background: rgba(0,0,0,.07); }
-    .${PIN_CLS}.${PIN_ON_CLS} { color: #e5c614; }
+    .${PIN_CLS}.${PIN_ON_CLS} { color: #c9ad07; }
     .${HIGHLIGHT} { box-shadow: inset 3px 0 0 #e5c614; }
 
-    /* pinned section — sticky below toolbar */
+    /* ── Pinned section — sticky below toolbar, clearly branded ── */
     #${PINNED_ID} {
       position: sticky; top: 45px; z-index: 99;
-      background: #fff; border-bottom: 1px solid rgba(0,0,0,.1);
+      background: #fffdf0;
+      border-bottom: 2px solid rgba(229,198,20,.5);
     }
     .amd-ta-pin-sep {
-      padding: 4px 10px 2px; font-size: 10px; font-weight: 700;
-      color: #9aa0a6; text-transform: uppercase; letter-spacing: .06em;
-      font-family: system-ui, sans-serif;
+      display: flex; align-items: center; gap: 7px;
+      padding: 6px 10px 4px;
+      font-size: 10px; font-weight: 700; letter-spacing: .07em;
+      text-transform: uppercase; font-family: system-ui, sans-serif;
+      color: #7a6f1a;
     }
+    /* small pin icon before the label */
+    .amd-ta-pin-sep::before {
+      content: '';
+      display: inline-block; width: 10px; height: 10px; flex-shrink: 0;
+      background: #e5c614; border-radius: 2px;
+    }
+
+    /* cloned pinned rows */
     .amd-ta-clone {
-      background: rgba(229,198,20,.07) !important;
-      box-shadow: inset 3px 0 0 #e5c614 !important;
+      background: rgba(229,198,20,.13) !important;
+      border-left: 3px solid #e5c614 !important;
+      box-shadow: none !important;
     }
-    .amd-ta-clone .${PIN_CLS} { display: inline-flex !important; color: #e5c614; }
+    .amd-ta-clone:hover { background: rgba(229,198,20,.2) !important; }
+    .amd-ta-clone .${PIN_CLS} { display: inline-flex !important; color: #c9ad07; }
     .amd-ta-placeholder {
-      padding: 7px 10px; font-size: 13px; color: #9aa0a6;
+      padding: 7px 12px; font-size: 12px; color: #9aa0a6;
       font-style: italic; font-family: system-ui, sans-serif;
     }
   `
@@ -242,7 +260,7 @@ function updatePinnedSection() {
   }
 
   const section = document.getElementById(PINNED_ID)!
-  section.innerHTML = `<div class="amd-ta-pin-sep">Fissati</div>`
+  section.innerHTML = `<div class="amd-ta-pin-sep">Fissati&nbsp;<span style="font-weight:400;opacity:.7">(${pinnedNames.size})</span></div>`
 
   const rows = evRows()
   for (const name of pinnedNames) {
