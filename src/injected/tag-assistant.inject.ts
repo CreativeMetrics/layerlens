@@ -2,9 +2,10 @@
 // Features: event search, event pin, variable search.
 //
 // SCROLL STRATEGY FOR PINNED EVENTS
-// scrollToRow() uses the toolbar's own parentElement as the scroll container
-// (we prepended the toolbar there, so we know it's correct). Walking up from
-// a target row with scrollAncestor() can land on the wrong node in some layouts.
+// The real scroll container is .message-list__scrollpane (a *child* of .message-list,
+// NOT an ancestor). scrollAncestor() walks UP and misses it — it lands on the page's
+// main scroll container instead. We inject the toolbar directly into .message-list__scrollpane;
+// then ROOT_ID.parentElement === .message-list__scrollpane === the correct scrollEl.
 
 const ROOT_ID        = 'amd-ta-root'
 const PINNED_ID      = 'amd-ta-pinned'
@@ -335,9 +336,15 @@ function injectToolbar() {
   if (document.getElementById(ROOT_ID)?.isConnected) return
   document.getElementById(ROOT_ID)?.remove()
 
-  const list = listContainer()
-  if (!list) return
-  const scroll = scrollAncestor(list)
+  // .message-list__scrollpane is the *real* scroll container (confirmed from DOM).
+  // It is a child of .message-list, so scrollAncestor() (which walks UP) misses it
+  // and ends up on the page's main scroll container — that's why every previous
+  // scrollTop attempt scrolled the main page instead of the sidebar.
+  //
+  // Injecting the toolbar here with position:sticky;top:0 makes it stick to the
+  // top of the scrollpane, and ROOT_ID.parentElement becomes the correct scrollEl.
+  const scrollpane = document.querySelector<HTMLElement>('.message-list__scrollpane')
+  if (!scrollpane) return
 
   const root = document.createElement('div')
   root.id = ROOT_ID
@@ -355,7 +362,7 @@ function injectToolbar() {
       <input type="search" id="amd-ta-search-input" placeholder="Cerca eventi…" autocomplete="off" spellcheck="false" />
       <span id="amd-ta-count" style="display:none"></span>
     </div>`
-  scroll.prepend(root)
+  scrollpane.prepend(root)
 
   document.getElementById('amd-ta-search-input')
     ?.addEventListener('input', (e) => {
