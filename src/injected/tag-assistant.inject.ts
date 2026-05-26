@@ -127,32 +127,42 @@ function evRows(): HTMLElement[] { return allMatches(ROW_SELECTORS) }
 
 /**
  * Scroll a list row into view, correctly accounting for our sticky headers.
- * We use the toolbar's parentElement as the scroll container — it's guaranteed
- * correct because we prepended the toolbar there ourselves.
- * Removing target.click() here: it was cancelling the smooth scroll in Chrome.
+ *
+ * Strategy: getBoundingClientRect on both the scroll container and the target
+ * gives viewport-relative positions that are always accurate, even when the
+ * target is above or below the visible area. The delta between them tells us
+ * exactly how much to adjust scrollTop. No offsetParent chain, no scrollIntoView
+ * ancestor-resolution ambiguity.
+ *
+ * Previous failures:
+ *   v1 (getBoundingClientRect + smooth): smooth is async → got cancelled;
+ *      target.click() also interrupted it; clones gave near-zero delta.
+ *   v2 (offsetTop chain): offsetParent skips position:static ancestors →
+ *      offset became relative to <body>, not scrollEl.
+ *   v3 (scrollIntoView + scrollBy): scrollIntoView resolves to the nearest
+ *      scrollable ancestor of the TARGET, which may differ from scrollEl if
+ *      .message-list itself is overflow:auto; scrollBy then acts on the wrong el.
+ *
+ *   Now fixed: no smooth, no click(), clone filter in caller, explicit scrollEl.
  */
 function scrollToRow(target: HTMLElement) {
-  // We MUST use offsetTop traversal instead of getBoundingClientRect():
-  // getBoundingClientRect().top returns position relative to the VIEWPORT,
-  // which is wrong for elements that are scrolled off-screen (the delta comes
-  // out near-zero and the scroll "moves slightly then stops").
-  // offsetTop always gives the correct absolute offset inside the container.
-  const scrollEl = document.getElementById(ROOT_ID)?.parentElement
-  if (!scrollEl) { target.scrollIntoView({ block: 'center' }); return }
+  const root     = document.getElementById(ROOT_ID)
+  const scrollEl = root?.parentElement
+  if (!scrollEl) return
 
-  const stickyH = (document.getElementById(ROOT_ID)?.offsetHeight  ?? 46)
-               + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
-               + 10
+  const stickyH = (root.offsetHeight ?? 46)
+                + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
+                + 8
 
-  let absoluteTop = 0
-  let el: HTMLElement | null = target
-  while (el && el !== scrollEl) {
-    absoluteTop += el.offsetTop
-    el = el.offsetParent as HTMLElement | null
-  }
-  // Instant scroll — smooth scroll gets interrupted by Angular zone re-renders.
-  // The CSS flash animation on the target provides visual feedback instead.
-  scrollEl.scrollTo({ top: Math.max(0, absoluteTop - stickyH) })
+  // getBoundingClientRect is always viewport-relative and accurate for
+  // off-screen elements (they simply have top < 0 or top > window.innerHeight).
+  // delta = distance from the container's visible top to where we want the row.
+  const containerTop = scrollEl.getBoundingClientRect().top
+  const targetTop    = target.getBoundingClientRect().top
+  const delta        = targetTop - containerTop - stickyH
+
+  // Instant (no behavior param) → synchronous, not cancellable.
+  scrollEl.scrollTop += delta
 }
 
 function pinSvg() {
