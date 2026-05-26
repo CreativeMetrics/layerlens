@@ -1,6 +1,6 @@
 {
   "name": "layerlens",
-  "version": "5.1.0-dev",
+  "version": "5.2.0",
   "description": "Vedi dentro il tuo GTM: filtri e strumenti per Tag Manager + inspector del dataLayer.",
   "type": "module",
   "private": true,
