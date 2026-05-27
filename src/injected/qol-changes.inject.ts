@@ -256,6 +256,11 @@ function updateVisibleCount(rows: GtmRow[]) {
 //  • triggers → bundled img/trigger/{rawType}.png
 //  • variables→ bundled img/variable/{publicId}.png
 //  • fallback → a small coloured square with the type's initial
+//
+// Race-condition guard: Angular sometimes loads row data in two passes — the
+// first pass has only a numeric type code (no typeDisplayName), so the initial
+// badge would show a digit. We store the display name on a data attribute and
+// re-create the badge on the next sync pass when better data arrives.
 function addTypeIcons(rows: GtmRow[]) {
   if (currentPage === '') return
   for (const r of rows) {
@@ -273,15 +278,28 @@ function addTypeIcons(rows: GtmRow[]) {
       nameCell.querySelector<HTMLElement>('a') ?? // the name link
       nameCell.querySelector<HTMLElement>('.fill-cell') ??
       nameCell
-    if (host.querySelector('.amd-type-icon')) continue
+
+    const existing = host.querySelector<HTMLElement>('.amd-type-icon')
+    if (existing) {
+      // Badge already present — keep it if:
+      //  a) the image has successfully loaded (adding new probe would re-flash), OR
+      //  b) the display name hasn't changed (data is still the same).
+      // Otherwise remove and re-create: the first sync had partial data.
+      if (existing.classList.contains('amd-has-img')) continue
+      if (existing.dataset.amdDisplay === r.displayName) continue
+      existing.remove()
+    }
 
     const badge = initialBadge(r)
+    badge.dataset.amdDisplay = r.displayName
     host.insertBefore(badge, host.firstChild)
 
     const url = pickIconUrl(r)
     if (url) {
       const probe = new Image()
       probe.onload = () => {
+        // Guard: skip if the row was re-rendered and this badge is no longer live.
+        if (!badge.isConnected) return
         badge.style.backgroundImage = `url("${url}")`
         badge.classList.add('amd-has-img')
         badge.textContent = ''
@@ -317,10 +335,19 @@ function pickIconUrl(r: GtmRow): string {
   return ''
 }
 
+// Page-type fallback initials used when a displayName starts with a digit
+// (numeric internal type codes from partially-loaded Angular data).
+const PAGE_INITIAL: Partial<Record<PageType, string>> = {
+  TAGS: 'T', TRIGGERS: 'T', VARIABLES: 'V', CLIENTS: 'C',
+}
+
 function initialBadge(r: GtmRow): HTMLElement {
   const i = document.createElement('span')
   i.className = 'amd-type-icon amd-type-initial'
-  i.textContent = (r.displayName || '?').trim().charAt(0).toUpperCase()
+  const first = (r.displayName || '?').trim().charAt(0).toUpperCase()
+  // Numeric first character → data is still partial; use a page-type fallback
+  // so the badge never shows a meaningless digit to the user.
+  i.textContent = /^\d/.test(first) ? (PAGE_INITIAL[currentPage] ?? '?') : first
   i.title = r.displayName
   return i
 }

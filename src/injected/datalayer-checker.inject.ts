@@ -121,3 +121,93 @@ function stopLive() {
 }
 
 void dataLayerName // reserved for future use (custom dataLayer name display)
+
+// ── Shopify Pixel Sandbox bridge — parent side ────────────────────────────────
+// Listens for '__ll_shopify_sandbox__' postMessages sent by the sandbox wrapper
+// injected via background.ts (executeScript) or shopify-sandbox.content.ts.
+// Uses SYN/ACK handshake so no events are lost if injection races the listener.
+// Deduplication by event_id guards against the same payload arriving twice.
+;(function () {
+  const win = window as unknown as Record<string, unknown>
+  if (win['__llShopifyParentBridge']) return
+  win['__llShopifyParentBridge'] = true
+
+  const MSG_TYPE = '__ll_shopify_sandbox__'
+  const SYN_TYPE = '__ll_sandbox_syn__'
+  const ACK_TYPE = '__ll_sandbox_ack__'
+
+  function pushToParentDL(payload: unknown): void {
+    if (!Array.isArray(win['dataLayer'])) win['dataLayer'] = []
+    const dl = win['dataLayer'] as unknown[]
+    const pid = (payload as Record<string, unknown>)?.['event_id']
+    if (pid && typeof pid === 'string') {
+      // Skip if an item with this event_id is already in the parent dataLayer
+      // (Elevar pixels may push to window.top.dataLayer directly AND via the bridge).
+      if (dl.some(
+        (item) => typeof item === 'object' && item !== null &&
+          (item as Record<string, unknown>)['event_id'] === pid
+      )) return
+      if (win['__llSeenIds'] === undefined) win['__llSeenIds'] = new Set<string>()
+      ;(win['__llSeenIds'] as Set<string>).add(pid)
+      setTimeout(() => (win['__llSeenIds'] as Set<string>).delete(pid), 5000)
+    }
+    dl.push(payload)
+  }
+
+  let bridgeReady = false
+  const bridgeBuffer: unknown[] = []
+
+  function flushBridgeBuffer(): void {
+    while (bridgeBuffer.length > 0) pushToParentDL(bridgeBuffer.shift())
+  }
+
+  window.addEventListener(
+    'message',
+    (e: MessageEvent) => {
+      if (!e.data || typeof e.data !== 'object') return
+      const d = e.data as Record<string, unknown>
+
+      // Handshake: sandbox sends SYN → we reply ACK; or sandbox replies ACK to our SYN.
+      if (d['type'] === SYN_TYPE || d['type'] === ACK_TYPE) {
+        if (d['type'] === SYN_TYPE && e.source) {
+          ;(e.source as Window).postMessage(
+            { type: ACK_TYPE },
+            e.origin === 'null' ? '*' : e.origin,
+          )
+        }
+        if (!bridgeReady) { bridgeReady = true; flushBridgeBuffer() }
+        return
+      }
+
+      if (d['type'] === MSG_TYPE) {
+        const payload = d['payload']
+        if (!payload || typeof payload !== 'object') return
+        // Dedup by event_id (set by Elevar / custom pixel pushes).
+        const pid = (payload as Record<string, unknown>)['event_id']
+        if (pid && typeof pid === 'string') {
+          if (win['__llSeenIds'] === undefined) win['__llSeenIds'] = new Set<string>()
+          const seen = win['__llSeenIds'] as Set<string>
+          if (seen.has(pid)) return
+          seen.add(pid)
+          setTimeout(() => seen.delete(pid), 5000)
+        }
+        if (bridgeReady) pushToParentDL(payload)
+        else bridgeBuffer.push(payload)
+      }
+    },
+    { passive: true },
+  )
+
+  // Initiate handshake with pixel iframes already in the DOM, and retry
+  // periodically so iframes loaded after this script also get the SYN.
+  function synWithPixelIframes(): void {
+    document
+      .querySelectorAll<HTMLIFrameElement>(
+        '#web-pixels-manager-sandbox-container iframe[src*="/custom/web-pixel-"]',
+      )
+      .forEach((iframe) => iframe.contentWindow?.postMessage({ type: SYN_TYPE }, '*'))
+  }
+  synWithPixelIframes()
+  setTimeout(synWithPixelIframes, 1000)
+  setTimeout(synWithPixelIframes, 3000)
+})()

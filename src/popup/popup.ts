@@ -114,19 +114,27 @@ function highlight(json: string) {
 function makePushNode(push: unknown, index: number): HTMLElement {
   const obj = push as Record<string, unknown>
   const hasEvent = obj && typeof obj === 'object' && typeof obj.event === 'string'
-  const event = hasEvent ? (obj.event as string) : `push ${index + 1}`
+  const isShopify = obj?._shopify === true
+  const rawEventName = hasEvent ? (obj.event as string) : `push ${index + 1}`
+  // For Shopify events, show the short name (after "shopify:") in the header.
+  const event = isShopify && rawEventName.startsWith('shopify:')
+    ? rawEventName.slice('shopify:'.length)
+    : rawEventName
   const json = JSON.stringify(push, null, 2)
   const propCount = obj && typeof obj === 'object' ? Object.keys(obj).length : 0
   const wrap = document.createElement('div')
-  wrap.className = 'push' + (hasEvent ? ' has-event' : '')
+  wrap.className = 'push' + (hasEvent ? ' has-event' : '') + (isShopify ? ' shopify-push' : '')
   // Store searchable text as data attributes so applyFilter() never touches the DOM.
   wrap.dataset.ev = event.toLowerCase()
   wrap.dataset.json = json.toLowerCase()
   wrap.dataset.raw = json  // original JSON string — used by pin persistence
+  const shopifyBadge = isShopify
+    ? `<span class="shopify-badge" title="Evento Shopify Web Pixel">Shopify</span>`
+    : ''
   wrap.innerHTML = `
     <div class="push-head">
       <svg class="chev" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6l-6 6"/></svg>
-      <span class="ev">${escapeHtml(String(event))}</span>
+      ${shopifyBadge}<span class="ev">${escapeHtml(String(event))}</span>
       <span class="push-prop-count">${propCount} prop</span>
       <button class="pin-btn" title="Fissa in cima" aria-pressed="false"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4"/><path d="M9 15l-4.5 4.5"/><path d="M14.5 4l5.5 5.5"/></svg></button>
       <span class="copy"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z"/><path d="M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2"/></svg>copia</span>

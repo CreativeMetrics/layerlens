@@ -5,6 +5,9 @@
 import injectedPath from '@/injected/datalayer-checker.inject.ts?script&module'
 import type { PageMessage, RuntimeMessage } from '@/types/messages'
 
+// Main dataLayer monitor + Shopify sandbox bridge parent listener.
+// (The Shopify pixel sandbox wrapper is injected per-frame from background.ts
+//  via chrome.scripting.executeScript on webNavigation.onDOMContentLoaded.)
 const script = document.createElement('script')
 script.type = 'module'
 script.src = chrome.runtime.getURL(injectedPath)

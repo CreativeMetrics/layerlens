@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LayerLens",
-  "version": "5.4.12",
+  "version": "5.5.0",
   "description": "Vedi dentro il tuo GTM: filtri e strumenti per Tag Manager + inspector del dataLayer.",
   "icons": {
     "16": "img/icon-16.png",
@@ -18,7 +18,9 @@
     "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess",
     "alarms",
-    "cookies"
+    "cookies",
+    "webNavigation",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -37,6 +39,16 @@
       "matches": [
         "<all_urls>"
       ]
+    },
+    {
+      "js": [
+        "assets/shopify-sandbox.content.ts-BWeuvOOZ.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ],
+      "all_frames": true,
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
@@ -51,11 +63,13 @@
         "img/variable/*",
         "assets/storage-DQyFDKmw.js",
         "assets/block-page-change.content.ts-ComrqY3Y.js",
-        "assets/datalayer-checker.inject.ts-DB-WYtZR.js",
+        "assets/datalayer-checker.inject.ts-B1QOnbUT.js",
         "assets/datalayer-checker.content.ts-wXkMdQKM.js",
-        "assets/qol-changes.inject.ts-B2ycCkHa.js",
+        "assets/qol-changes.inject.ts-Cba8_yRH.js",
         "assets/tag-assistant.inject.ts-DFHTQTmd.js",
-        "assets/qol-changes.content.ts-D_kLODl9.js"
+        "assets/qol-changes.content.ts-D_kLODl9.js",
+        "assets/shopify-sandbox.inject.ts-Cn7MaLGK.js",
+        "assets/shopify-sandbox.content.ts-BWeuvOOZ.js"
       ],
       "use_dynamic_url": false
     }

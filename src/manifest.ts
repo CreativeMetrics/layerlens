@@ -28,6 +28,8 @@ export default defineManifest({
     'declarativeNetRequestWithHostAccess',
     'alarms',
     'cookies',
+    'webNavigation',
+    'scripting',
   ],
   host_permissions: ['<all_urls>'],
 
@@ -41,6 +43,14 @@ export default defineManifest({
         'src/content/datalayer-checker.content.ts',
         'src/content/qol-changes.content.ts',
       ],
+    },
+    {
+      // Injects the Shopify pixel sandbox wrapper into every sub-frame.
+      // The injected script self-exits immediately on non-Shopify frames.
+      matches: ['<all_urls>'],
+      all_frames: true,
+      run_at: 'document_start',
+      js: ['src/content/shopify-sandbox.content.ts'],
     },
   ],
 
