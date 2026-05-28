@@ -5,6 +5,9 @@
 //
 // tagassistant.google.com → injects tag-assistant.inject.ts
 //   (event search across pages, pin events to top)
+//
+// Any URL with ?id=...&gtm_auth=...&gtm_preview=... (sGTM debug on custom domain)
+//   → also injects tag-assistant.inject.ts
 
 import qolInjectedPath from '@/injected/qol-changes.inject.ts?script&module'
 import taInjectedPath  from '@/injected/tag-assistant.inject.ts?script&module'
@@ -12,6 +15,13 @@ import * as storage from '@/lib/storage'
 
 const GTM_UI = 'tagmanager.google.com'
 const TAG_ASSISTANT = 'tagassistant.google.com'
+
+// sGTM preview/debug pages live on the sGTM server's custom domain — not on
+// tagassistant.google.com. Stape detects them by URL params (same approach).
+function isSgtmPreview(): boolean {
+  const p = new URLSearchParams(location.search)
+  return ['id', 'gtm_auth', 'gtm_preview'].every(k => p.has(k))
+}
 
 function injectScript(absoluteUrl: string, dataAttrs?: Record<string, string>) {
   const s = document.createElement('script')
@@ -54,7 +64,7 @@ async function boot() {
     return
   }
 
-  if (host === TAG_ASSISTANT) {
+  if (host === TAG_ASSISTANT || isSgtmPreview()) {
     injectScript(chrome.runtime.getURL(taInjectedPath))
     return
   }

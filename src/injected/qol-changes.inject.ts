@@ -14,6 +14,7 @@ import {
   getRowElements,
   hasBuiltInVariables,
   setBuiltInVariablesCollapsed,
+  toggleTagPause,
   type GtmRow,
 } from '@/lib/gtm-angular'
 import { pageType, type PageType } from '@/lib/gtm-selectors'
@@ -155,14 +156,23 @@ function injectStyleOnce() {
   rowStyle.textContent = `
     :root {
       --amd-copy-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z'/%3E%3Cpath d='M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2'/%3E%3C/svg%3E");
+      --amd-pause-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Crect x='6' y='4' width='4' height='16' rx='1'/%3E%3Crect x='14' y='4' width='4' height='16' rx='1'/%3E%3C/svg%3E");
+      --amd-resume-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M8 5v14l11-7z'/%3E%3C/svg%3E");
+    }
+    .amd-icon-group {
+      display: inline-flex !important; position: relative !important;
+      align-items: center !important; gap: 2px !important;
+      vertical-align: middle !important; flex-shrink: 0 !important;
+      margin-left: 6px !important;
     }
     .amd-copy-element {
+      appearance: none; border: none; padding: 0; outline: none;
       display: inline-flex; align-items: center; justify-content: center;
-      cursor: pointer; margin-left: 10px; vertical-align: middle;
+      cursor: pointer; vertical-align: middle;
       width: 30px; height: 30px; border-radius: 8px;
       background: transparent; opacity: .25; transition: background .12s, opacity .12s;
     }
-    /* show clearly when hovering the row it belongs to */
+    /* show on row hover */
     [gtm-table-row]:hover .amd-copy-element,
     tr:hover .amd-copy-element { opacity: 1; }
     .amd-copy-element::before {
@@ -177,6 +187,38 @@ function injectStyleOnce() {
     .amd-copy-element.amd-copy-ok::before { background-color: #137333 !important; }
     .amd-copy-element.amd-copy-err { background: #fce8e6 !important; opacity: 1; transition: none; }
     .amd-copy-element.amd-copy-err::before { background-color: #c5221f !important; }
+    .amd-pause-element {
+      appearance: none; border: none; padding: 0; outline: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      cursor: pointer; vertical-align: middle;
+      width: 30px; height: 30px; border-radius: 8px;
+      background: transparent; opacity: 0; transition: background .12s, opacity .12s;
+    }
+    /* show on row hover when not paused */
+    [gtm-table-row]:hover .amd-pause-element,
+    tr:hover .amd-pause-element { opacity: 1; }
+    .amd-pause-element::before {
+      content: ''; width: 17px; height: 17px; display: block;
+      background-color: #5f6368; transition: background-color .12s;
+      -webkit-mask: var(--amd-pause-mask) center / contain no-repeat;
+      mask: var(--amd-pause-mask) center / contain no-repeat;
+    }
+    .amd-pause-element:hover { background: #faf6da; opacity: 1; }
+    .amd-pause-element:hover::before { background-color: #2c2c2a; }
+    /* paused state: always visible, play icon to indicate "click to resume" */
+    .amd-pause-element.amd-pause-on { opacity: 1; background: #fef3e0; }
+    .amd-pause-element.amd-pause-on::before {
+      width: 13px; height: 13px;
+      background-color: #f29900;
+      -webkit-mask: var(--amd-resume-mask) center / contain no-repeat;
+      mask: var(--amd-resume-mask) center / contain no-repeat;
+    }
+    .amd-pause-element.amd-pause-on:hover { background: #fde8a0; }
+    .amd-pause-element.amd-pause-on:hover::before { background-color: #c67a00; }
+    .amd-pause-element.amd-pause-ok { background: #e6f4ea !important; opacity: 1; transition: none; }
+    .amd-pause-element.amd-pause-ok::before { background-color: #137333 !important; }
+    .amd-pause-element.amd-pause-err { background: #fce8e6 !important; opacity: 1; transition: none; }
+    .amd-pause-element.amd-pause-err::before { background-color: #c5221f !important; }
     .amd-type-icon {
       width: 20px; height: 20px; object-fit: contain; vertical-align: middle;
       margin-right: 9px; border-radius: 4px; flex-shrink: 0;
@@ -365,24 +407,82 @@ function addCopyIcons(rows: GtmRow[]) {
       tr.querySelector<HTMLElement>('td:last-child')
     if (!lastCell) continue
     if (lastCell.querySelector('.amd-copy-element')) continue
-    const icon = document.createElement('i')
+    let group = lastCell.querySelector<HTMLElement>('.amd-icon-group')
+    if (!group) {
+      group = document.createElement('span')
+      group.className = 'amd-icon-group'
+      lastCell.appendChild(group)
+    }
+    const icon = document.createElement('button')
     icon.className = 'amd-copy-element qol-row-not-clickable'
     icon.title = 'Duplica'
-    icon.setAttribute('role', 'button')
+    icon.type = 'button'
     icon.addEventListener(
       'click',
       (ev) => {
         ev.preventDefault()
         ev.stopPropagation()
         copyRowToNew(currentPage as Exclude<PageType, ''>, icon, (ok) => {
-          // Brief visual feedback: green flash on success, red on failure.
           icon.classList.add(ok ? 'amd-copy-ok' : 'amd-copy-err')
           setTimeout(() => icon.classList.remove('amd-copy-ok', 'amd-copy-err'), 1200)
         })
       },
-      true, // capture phase: run BEFORE GTM's own row handlers
+      true,
     )
-    lastCell.appendChild(icon)
+    group.appendChild(icon)
+  }
+}
+
+// Add a "pause/resume" icon to each tag row's last cell.
+// - When the tag is NOT paused: icon is hover-only (opacity 0 → 1), shows pause bars.
+// - When the tag IS paused: icon is always visible (orange), shows play triangle.
+// Only active on the TAGS page — pause doesn't apply to triggers/variables/clients.
+function addPauseIcons(rows: GtmRow[]) {
+  if (currentPage !== 'TAGS') return
+  for (const r of rows) {
+    const tr =
+      (r.node.matches('tr') ? r.node : r.node.querySelector<HTMLElement>('tr')) ?? r.node
+    const lastCell =
+      tr.querySelector<HTMLElement>(':scope > td:last-child') ??
+      tr.querySelector<HTMLElement>('td:last-child')
+    if (!lastCell) continue
+
+    let group = lastCell.querySelector<HTMLElement>('.amd-icon-group')
+    if (!group) {
+      group = document.createElement('span')
+      group.className = 'amd-icon-group'
+      lastCell.appendChild(group)
+    }
+
+    let icon = group.querySelector<HTMLButtonElement>('.amd-pause-element')
+    if (!icon) {
+      icon = document.createElement('button')
+      icon.className = 'amd-pause-element qol-row-not-clickable'
+      icon.type = 'button'
+      icon.addEventListener(
+        'click',
+        (ev) => {
+          ev.preventDefault()
+          ev.stopPropagation()
+          const rowEl = (icon!.closest('[gtm-table-row]') ?? icon!.closest('tr')) as HTMLElement | null
+          if (!rowEl) return
+          toggleTagPause(rowEl, (ok) => {
+            icon!.classList.add(ok ? 'amd-pause-ok' : 'amd-pause-err')
+            setTimeout(() => icon!.classList.remove('amd-pause-ok', 'amd-pause-err'), 1200)
+          })
+        },
+        true,
+      )
+      group.appendChild(icon)
+    }
+
+    const isPaused = r.paused === true
+    icon.classList.toggle('amd-pause-on', isPaused)
+    icon.title = isPaused ? 'Riprendi' : 'Metti in pausa'
+
+    // Hide GTM's native pause badge — redundant with our play/resume icon.
+    const nativePauseBadge = lastCell.querySelector<HTMLElement>('.pause-circle-filled-icon')
+    if (nativePauseBadge) nativePauseBadge.style.display = isPaused ? 'none' : ''
   }
 }
 
@@ -637,6 +737,60 @@ function openLabelEditor() {
   })
 }
 
+// ── Shift+click bulk selection ────────────────────────────────────────────────
+
+function initBulkSelection() {
+  if (window.__amdBulkBound) return
+  window.__amdBulkBound = true
+
+  let lastRow: HTMLElement | null = null
+
+  document.addEventListener(
+    'click',
+    (e: MouseEvent) => {
+      const checkboxArea = (e.target as HTMLElement).closest<HTMLElement>('[gtm-table-row-checkbox]')
+      if (!checkboxArea) return
+      const row = checkboxArea.closest<HTMLElement>('[gtm-table-row]')
+      if (!row) return
+      const table = row.closest<HTMLElement>('table')
+      if (!table) return
+
+      if (!e.shiftKey || !lastRow || lastRow.closest('table') !== table) {
+        lastRow = row
+        return
+      }
+
+      e.preventDefault() // prevent text selection on shift+click
+
+      const allRows = Array.from(table.querySelectorAll<HTMLElement>('[gtm-table-row]'))
+      const currentIdx = allRows.indexOf(row)
+      const lastIdx = allRows.indexOf(lastRow)
+      if (currentIdx < 0 || lastIdx < 0) return
+
+      const start = Math.min(lastIdx, currentIdx)
+      const end   = Math.max(lastIdx, currentIdx)
+
+      const cb = checkboxArea.querySelector<HTMLInputElement>('input[type="checkbox"]')
+      const targetChecked = cb ? !cb.checked : true
+
+      for (let i = start; i <= end; i++) {
+        if (allRows[i] === row) continue // let the natural click handle the clicked row
+        const area = allRows[i].querySelector<HTMLElement>('[gtm-table-row-checkbox]')
+        if (!area) continue
+        const input = area.querySelector<HTMLInputElement>('input[type="checkbox"]')
+        const isChecked =
+          input ? input.checked
+          : area.getAttribute('aria-checked') === 'true' ||
+            area.classList.contains('mat-checkbox-checked')
+        if (isChecked !== targetChecked) area.click()
+      }
+
+      lastRow = row
+    },
+    true,
+  )
+}
+
 /** Re-read rows and refresh toolbar + visibility. `rebuild` re-renders chips. */
 function sync(rebuild = false) {
   const page = pageType()
@@ -662,6 +816,8 @@ function sync(rebuild = false) {
   applyToDom(rows)
   addTypeIcons(rows)
   addCopyIcons(rows)
+  addPauseIcons(rows)
+  initBulkSelection()
 }
 
 // Keep in sync with GTM's own re-renders (debounced). Ignore mutations that
@@ -688,6 +844,7 @@ declare global {
   interface Window {
     QOL?: Record<string, unknown>
     __amdSlashBound?: boolean
+    __amdBulkBound?: boolean
   }
 }
 window.QOL ??= {}

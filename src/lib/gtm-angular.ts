@@ -198,6 +198,8 @@ export interface GtmRow {
   rawType?: string
   /** Variable publicId ('jsm', 'aev'...) for the icon file. */
   publicId?: string
+  /** Whether the element is currently paused (tags only). */
+  paused?: boolean
 }
 
 // Proven anchors (from the original, working extension): the list lives under
@@ -302,6 +304,7 @@ export function getRowElements(page: Exclude<PageType, ''>): GtmRow[] {
         brandThumbnailUrl: (data?.brandThumbnailUrl as string | undefined) ?? '',
         rawType: data?.type == null ? '' : String(data.type),
         publicId: publicId ?? '',
+        paused: data?.paused === true,
       }
     })
     // Drop rows whose data isn't loaded yet (avoids a transient "Sconosciuto"
@@ -662,6 +665,118 @@ function clickCopyItem(): boolean {
     copyItem.click()
     return true
   } catch {
+    return false
+  }
+}
+
+// ── Pause/resume helpers ──────────────────────────────────────────────────────
+
+/** Toggle the paused state of a tag row using the Angular tagService directly.
+ *  Mirrors the original extension's toggleTagPauseState:
+ *    tagService.get(key) → toggle data.paused → tagService.update(entity)
+ *
+ *  Returns true if the operation was initiated (result delivered via onResult). */
+export function toggleTagPause(rowEl: HTMLElement, onResult?: (ok: boolean) => void): boolean {
+  try {
+    const inj = injector()
+    if (!inj) {
+      console.debug('[Andromeda QoL] toggleTagPause: angular injector not available')
+      onResult?.(false)
+      return false
+    }
+
+    const svc = service('TAGS') as {
+      get: (key: unknown) => Promise<{ data: GtmElementData }>
+      getList: (ctx: unknown) => { $$state?: { value?: GtmElementScope[] } }
+      update: (entity: unknown) => Promise<unknown>
+    } | null
+
+    if (!svc) {
+      console.debug('[Andromeda QoL] toggleTagPause: tagService not found')
+      onResult?.(false)
+      return false
+    }
+
+    // Key resolution — same 3 strategies as copyRowToNew
+    let key: unknown
+
+    // Strategy 1: direct row scope (works when Angular debug info is enabled)
+    try {
+      const scope = window.angular?.element(rowEl).scope()
+      const tagEntry = (scope?.['tag'] ?? scope?.tag) as { key?: unknown } | undefined
+      if (tagEntry?.key != null) key = tagEntry.key
+    } catch { /* ignore */ }
+
+    // Strategy 2: table scope via tableCtrl
+    if (!key) {
+      try {
+        const table =
+          document.querySelector('.gtm-container-page-content [gtm-table]:last-of-type table') ??
+          document.querySelector('.gtm-container-page-content [gtm-table] table')
+        const tableScope = table
+          ? (window.angular?.element(table).scope() as
+              | { tableCtrl?: { getItems?: () => Array<{ key?: unknown }>; items?: Array<{ key?: unknown }>; internalItems?: Array<{ key?: unknown }> } }
+              | undefined)
+          : undefined
+        const ctrl = tableScope?.tableCtrl
+        const items = ctrl?.getItems?.() ?? ctrl?.items ?? ctrl?.internalItems
+        if (items) {
+          const allRows = table ? Array.from(table.querySelectorAll('[gtm-table-row]')) : []
+          const idx = allRows.indexOf(rowEl)
+          if (idx >= 0 && items[idx]) key = items[idx].key
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Strategy 3: $rootScope traversal (Server Side GTM — no debug info)
+    if (!key) key = findKeyViaRootScope('TAGS', rowName(rowEl))
+
+    // Strategy 4: getList name match
+    if (!key) {
+      const name = rowName(rowEl)
+      const context = appContext()
+      const list = svc.getList(context)?.$$state?.value ?? []
+      const match = name
+        ? list.find((e) => {
+            const entry = ((e as unknown as GtmRowScope).tag ?? e) as { data?: GtmElementData }
+            return entry.data?.name === name
+          })
+        : undefined
+      if (match) {
+        const entry = (match as unknown as GtmRowScope).tag ?? (match as unknown as { key?: unknown })
+        key = (entry as { key?: unknown }).key ?? undefined
+      }
+    }
+
+    if (!key) {
+      console.debug('[Andromeda QoL] toggleTagPause: could not resolve key for', rowName(rowEl))
+      onResult?.(false)
+      return false
+    }
+
+    // Clone the key (like the original) to avoid mutating the live scope object
+    const keyClone = Object.assign({}, key as Record<string, unknown>)
+
+    void svc.get(keyClone)
+      .then((fetched) => {
+        // Mirror the original: truthy check, delete vs set true
+        if ((fetched.data as Record<string, unknown>)['paused']) {
+          delete (fetched.data as Record<string, unknown>)['paused']
+        } else {
+          ;(fetched.data as Record<string, unknown>)['paused'] = true
+        }
+        return svc.update(fetched)
+      })
+      .then(() => onResult?.(true))
+      .catch((err) => {
+        console.warn('[Andromeda QoL] toggleTagPause: service error', err)
+        onResult?.(false)
+      })
+
+    return true
+  } catch (err) {
+    console.warn('[Andromeda QoL] toggleTagPause error', err)
+    onResult?.(false)
     return false
   }
 }

@@ -11,6 +11,7 @@
 const ROOT_ID        = 'amd-ta-root'
 const PINNED_ID      = 'amd-ta-pinned'
 const VAR_ROOT_ID    = 'amd-ta-var-root'
+const SGTM_WRAP_ID   = 'amd-sgtm-wrapper'
 const HIDDEN_CLS     = 'amd-ta-hidden'
 const VAR_HIDDEN_CLS = 'amd-ta-var-hidden'
 const PIN_CLS        = 'amd-ta-pin-btn'
@@ -335,6 +336,72 @@ function injectStyles() {
       font-size: 11px; color: #7a6f1a; flex-shrink: 0; white-space: nowrap;
       background: rgba(229,198,20,.28); padding: 2px 7px; border-radius: 10px;
     }
+
+    /* ── Tag type coloring ── */
+    .gtm-debug-card.amd-tag-colored {
+      border-left: 4px solid var(--amd-tag-color, #ccc) !important;
+    }
+    /* ── Failed tag ── */
+    .gtm-debug-card.amd-tag-failed {
+      background: rgba(220, 38, 38, .07) !important;
+      border-left: 4px solid #dc2626 !important;
+    }
+    /* ── JSON formatter ── */
+    .amd-json-copy {
+      display: inline-block; margin: 0 0 5px;
+      padding: 3px 10px; font-size: 11px; font-weight: 500; line-height: 1.5;
+      background: #f1f3f4; border: 1px solid rgba(0,0,0,.14);
+      border-radius: 6px; cursor: pointer; color: #3c4043;
+      font-family: system-ui, sans-serif;
+    }
+    .amd-json-copy:hover { background: #e8eaed; }
+    .amd-json-key  { color: #a626a4; }
+    .amd-json-str  { color: #188038; }
+    .amd-json-num  { color: #c25e00; }
+    .amd-json-bool { color: #1967d2; }
+    .amd-json-null { color: #80868b; font-style: italic; }
+
+    /* ── URL param formatter ── */
+    .amd-url-fmt { font-size: 12px; }
+    .amd-url-fmt-header {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap;
+    }
+    .amd-url-fmt-base {
+      color: #5f6368; font-size: 11px; font-family: monospace;
+      word-break: break-all; flex: 1; min-width: 0;
+    }
+    .amd-url-params {
+      border-collapse: collapse; width: 100%;
+      border: 1px solid rgba(0,0,0,.1); border-radius: 4px; overflow: hidden;
+    }
+    .amd-url-params td {
+      padding: 4px 10px; vertical-align: top;
+      border-bottom: 1px solid rgba(0,0,0,.05); font-size: 12px;
+    }
+    .amd-url-params tr:last-child td { border-bottom: none; }
+    .amd-url-params tr:nth-child(even) { background: rgba(0,0,0,.02); }
+    .amd-url-key { color: #a626a4; font-family: monospace; width: 30%; word-break: break-word; }
+    .amd-url-val { color: #032f62; font-family: monospace; word-break: break-all; }
+
+    /* ── Consent Mode Monitor ── */
+    .amd-consent-badges {
+      display: flex; gap: 5px; flex-wrap: wrap; padding: 3px 0;
+    }
+    .amd-consent-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 7px; border-radius: 4px;
+      font-size: 11px; font-weight: 500; font-family: monospace;
+      white-space: nowrap;
+    }
+    .amd-consent-badge::before {
+      content: ''; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+    }
+    .amd-consent-badge.amd-c-ok  { background: #e6f4ea; color: #137333; }
+    .amd-consent-badge.amd-c-ok::before  { background: #137333; }
+    .amd-consent-badge.amd-c-no  { background: #fce8e6; color: #c5221f; }
+    .amd-consent-badge.amd-c-no::before  { background: #c5221f; }
+    .amd-consent-badge.amd-c-unk { background: #f1f3f4; color: #5f6368; }
+    .amd-consent-badge.amd-c-unk::before { background: #9aa0a6; }
   `
   document.head.appendChild(s)
 }
@@ -347,10 +414,6 @@ function injectToolbar() {
 
   const list = listContainer()
   if (!list) return
-  // scrollAncestor now detects overflow:'overlay' (Angular Material sidebar style)
-  // in addition to 'auto' and 'scroll'. Previously missing 'overlay' caused it to
-  // skip the sidebar and land on the main page container.
-  const scroll = scrollAncestor(list)
 
   const root = document.createElement('div')
   root.id = ROOT_ID
@@ -368,7 +431,30 @@ function injectToolbar() {
       <input type="search" id="amd-ta-search-input" placeholder="Cerca eventi…" autocomplete="off" spellcheck="false" />
       <span id="amd-ta-count" style="display:none"></span>
     </div>`
-  scroll.prepend(root)
+
+  const isSGTM = new URLSearchParams(location.search).has('gtm_auth')
+
+  if (isSGTM) {
+    // Clean up wrapper from a previous injection attempt if still in the DOM
+    const oldWrapper = document.getElementById(SGTM_WRAP_ID)
+    if (oldWrapper?.isConnected) {
+      if (list.closest(`#${SGTM_WRAP_ID}`)) oldWrapper.insertAdjacentElement('afterend', list)
+      oldWrapper.remove()
+    }
+    // On sGTM, insert the toolbar BEFORE the full-width two-column layout container
+    // (.content--debugger-content-component) so it spans both the events column and
+    // the details column, exactly like client-side Tag Assistant.
+    const contentDiv = document.querySelector<HTMLElement>('.content--debugger-content-component')
+    if (contentDiv) {
+      contentDiv.insertAdjacentElement('beforebegin', root)
+    } else {
+      list.prepend(root)
+    }
+    root.style.position = 'relative'
+    root.style.zIndex   = 'auto'  // let sGTM's tag-detail overlays appear on top
+  } else {
+    scrollAncestor(list).prepend(root)
+  }
 
   document.getElementById('amd-ta-search-input')
     ?.addEventListener('input', (e) => {
@@ -621,7 +707,389 @@ function applyVarFilter(tab: HTMLElement) {
   }
 }
 
+// ── Tag Type Coloring & Failed Tag Highlighting ──────────────────────────────
+
+const TAG_TYPE_RULES: Array<{ re: RegExp; color: string }> = [
+  { re: /Google Tag|Google Analytics 4|Google Analytics|GA4/i, color: '#EEA849' },
+  { re: /Google Ads/i,                                          color: '#4285F4' },
+  { re: /Facebook|Meta Pixel|Meta Conv/i,                       color: '#1877F2' },
+  { re: /TikTok/i,                                              color: '#010101' },
+  { re: /LinkedIn/i,                                            color: '#0A66C2' },
+  { re: /Pinterest/i,                                           color: '#E60023' },
+  { re: /Microsoft Ads|Bing Ads/i,                              color: '#00809D' },
+  { re: /Snapchat/i,                                            color: '#FFFC00' },
+  { re: /Klaviyo/i,                                             color: '#3D8D4E' },
+  { re: /Twitter|X Ads/i,                                       color: '#1DA1F2' },
+]
+
+function colorTagCards() {
+  const cards = document.querySelectorAll<HTMLElement>('.gtm-debug-card')
+  for (const card of cards) {
+    // Already colored/failed → permanent, skip
+    if (card.classList.contains('amd-tag-colored') || card.classList.contains('amd-tag-failed')) continue
+    // Explicitly marked as no known vendor → skip
+    if (card.dataset.amdCard === 'skip') continue
+
+    const typeText = (
+      card.querySelector('.gtm-debug-card__subtitle, .gtm-debug-card__description, [class*="subtitle"], [class*="type-name"]')
+        ?.textContent?.trim() ?? ''
+    )
+    const cardText = card.textContent ?? ''
+
+    // Angular hasn't rendered the type text yet → don't permanently skip, retry next sync
+    if (!typeText && !cardText.trim()) continue
+
+    const isFailed =
+      /\bfailed\b/i.test(cardText) ||
+      !!card.querySelector('[class*="failed"], [class*="exception"]')
+    if (isFailed) {
+      card.classList.add('amd-tag-failed')
+      continue
+    }
+
+    // Match against typeText first, then full cardText as fallback
+    let matched = false
+    for (const { re, color } of TAG_TYPE_RULES) {
+      if (re.test(typeText) || re.test(cardText)) {
+        card.style.setProperty('--amd-tag-color', color)
+        card.classList.add('amd-tag-colored')
+        matched = true
+        break
+      }
+    }
+    // Only skip permanently when the subtitle is already loaded but no vendor matched.
+    // If typeText is empty the subtitle hasn't rendered yet → retry on next sync.
+    if (!matched && typeText) card.dataset.amdCard = 'skip'
+  }
+}
+
+// ── JSON Auto-formatter ───────────────────────────────────────────────────────
+
+function syntaxHighlight(json: string): string {
+  const safe = json
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+  return safe.replace(
+    /("(?:\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g,
+    (match) => {
+      let cls = 'amd-json-num'
+      if (match.startsWith('"')) {
+        cls = match.endsWith(':') ? 'amd-json-key' : 'amd-json-str'
+      } else if (match === 'true' || match === 'false') {
+        cls = 'amd-json-bool'
+      } else if (match === 'null') {
+        cls = 'amd-json-null'
+      }
+      return `<span class="${cls}">${match}</span>`
+    },
+  )
+}
+
+// Selectors for HTTP body cells — covers both client-side and server-side Tag Assistant.
+// sGTM "HTTP Outgoing" uses different component names than client-side.
+const JSON_CELL_SEL = [
+  '.gtm-debug-table-cell--http-body pre',  // client-side Tag Assistant (inline body cell)
+  'pre[data-ng-bind*="getBody"]',           // sGTM modal: Angular binding ctrl.getBody()
+  'http-url-details pre',                   // sGTM HTTP Outgoing custom element (URL — skipped if not JSON)
+  '[class*="http-body"] pre',               // wildcard fallback
+  '[class*="outgoing-request"] pre',
+  '[class*="outgoing-http"] pre',
+  '[class*="request-body"] pre',
+].join(', ')
+
+function formatJsonCells() {
+  const cells = document.querySelectorAll<HTMLElement>(JSON_CELL_SEL)
+  for (const pre of cells) {
+    if (pre.dataset.amdJsonSkip) continue
+    if (pre.classList.contains('amd-json-fmt') && pre.children.length > 0) continue
+    const raw = pre.textContent?.trim() ?? ''
+    if (raw.length > 200_000) continue
+    if (!raw.startsWith('{') && !raw.startsWith('[')) continue
+    try {
+      const parsed = JSON.parse(raw)
+      const pretty = JSON.stringify(parsed, null, 2)
+      let btn = pre.parentElement?.querySelector<HTMLButtonElement>(':scope > .amd-json-copy')
+      if (!btn) {
+        btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'amd-json-copy'
+        pre.insertAdjacentElement('beforebegin', btn)
+      }
+      const capturedPretty = pretty
+      btn.textContent = 'Copia JSON'
+      btn.onclick = (e: MouseEvent) => {
+        e.stopPropagation()
+        navigator.clipboard.writeText(capturedPretty).then(() => {
+          btn!.textContent = '✓ Copiato'
+          setTimeout(() => { btn!.textContent = 'Copia JSON' }, 1500)
+        }).catch(() => {
+          btn!.textContent = '✗ Errore'
+          setTimeout(() => { btn!.textContent = 'Copia JSON' }, 1500)
+        })
+      }
+      pre.innerHTML = syntaxHighlight(pretty)
+      pre.classList.add('amd-json-fmt')
+      pre.style.whiteSpace = 'pre-wrap'
+      pre.style.wordBreak = 'break-all'
+    } catch {
+      pre.dataset.amdJsonSkip = '1'
+    }
+  }
+}
+
+// ── Consent Mode Monitor ─────────────────────────────────────────────────────
+
+// Decodes the `gcs` (Google Consent State) parameter found in GA4 Measurement
+// Protocol requests. Format: G + one char per consent type (1=granted, 0=denied).
+// Order: ad_storage, analytics_storage, ad_user_data, ad_personalization.
+const GCS_LABELS = ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization']
+
+function decodeGcs(gcs: string): Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null {
+  const m = gcs.match(/^[Gg](\d*)$/)
+  if (!m) return null
+  const flags = m[1]
+  if (!flags.length) return null
+  return GCS_LABELS.slice(0, flags.length).map((name, i) => ({
+    name,
+    state: flags[i] === '1' ? 'ok' : flags[i] === '0' ? 'no' : 'unk',
+  }))
+}
+
+/**
+ * Decodes gtm_session_consent_mode pipe-separated format used in the
+ * Properties > Event Settings Variable JSON (e.g. "denied|denied|granted").
+ * Order matches GCS_LABELS: ad_storage | analytics_storage | ad_user_data | ad_personalization.
+ */
+function decodeConsentMode(raw: string): Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null {
+  const parts = raw.trim().split('|').filter(Boolean)
+  if (!parts.length) return null
+  return parts.slice(0, GCS_LABELS.length).map((val, i) => ({
+    name: GCS_LABELS[i],
+    state: val.trim() === 'granted' ? 'ok' : val.trim() === 'denied' ? 'no' : 'unk',
+  }))
+}
+
+function makeConsentBadges(signals: Array<{ name: string; state: 'ok' | 'no' | 'unk' }>): HTMLElement {
+  const wrap = document.createElement('div')
+  wrap.className = 'amd-consent-badges'
+  for (const s of signals) {
+    const b = document.createElement('span')
+    b.className = `amd-consent-badge amd-c-${s.state}`
+    b.textContent = s.name
+    b.title = s.state === 'ok' ? 'granted' : s.state === 'no' ? 'denied' : 'unknown'
+    wrap.appendChild(b)
+  }
+  return wrap
+}
+
+// ── Consent: tag-details Properties section (client-side TA) ─────────────────
+
+/**
+ * Injects consent badges in the Properties section of the tag-details sheet.
+ *
+ * DOM structure (confirmed via debug):
+ *   tag-details                          ← Angular component for the tag detail sheet
+ *     div.gtm-sheet-card
+ *       div.gtm-debug-pane-header        ← "Properties" section label
+ *       table.tag-details__properties-table
+ *         td[class*="property-cell"]     ← each property row
+ *           div[class*="property-name"]  ← param name (may contain "gcs")
+ *           div[class*="property-value"] ← param value
+ *       gtag-hits-ng                     ← "Hits sent" section (fallback source)
+ *
+ * We try to read gcs from (in order):
+ *   1. td[class*="property-cell"] in the Properties table
+ *   2. span.param-chip inside gtag-hits-ng
+ *   3. Any td/cell with text "gcs" in the whole tag-details component
+ *
+ * Badge is injected immediately after the "Properties" pane header.
+ */
+function formatConsentBadges() {
+  const tagDetails = document.querySelectorAll<HTMLElement>('tag-details')
+
+  for (const tagDetail of tagDetails) {
+    if (tagDetail.dataset.amdConsentDone) continue
+
+    let signals: Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null = null
+
+    // ── 0. gtm_session_consent_mode in Event Settings Variable JSON ───────
+    // Visible in Properties table as part of the JSON value block.
+    // Format: "granted|denied|..." pipe-separated, order = GCS_LABELS.
+    if (!signals) {
+      const propsTable = tagDetail.querySelector<HTMLElement>(
+        'table[class*="properties-table"], .tag-details__properties-table',
+      )
+      if (propsTable) {
+        const text = propsTable.textContent ?? ''
+        const m = text.match(/gtm_session_consent_mode\s*:\s*"([^"]+)"/)
+        if (m) signals = decodeConsentMode(m[1])
+      }
+    }
+
+    // ── 1. gcs in Properties table cells (standalone row) ─────────────────
+    if (!signals) {
+      const propCells = tagDetail.querySelectorAll<HTMLElement>('td[class*="property-cell"]')
+      for (const cell of propCells) {
+        if (cell.dataset.amdGcsRead) continue
+        const nameEl = cell.querySelector<HTMLElement>('[class*="property-name"]')
+        const nameText = nameEl?.textContent?.trim() ?? cell.textContent?.trim() ?? ''
+        if (!/^\s*gcs\s*$/i.test(nameText)) continue
+        cell.dataset.amdGcsRead = '1'
+        const valEl = cell.querySelector<HTMLElement>('[class*="property-value"]')
+        const val = valEl?.textContent?.trim() ?? cell.nextElementSibling?.textContent?.trim() ?? ''
+        if (/^G\d+/i.test(val)) { signals = decodeGcs(val); break }
+      }
+    }
+
+    // ── 2. param-chip spans inside gtag-hits-ng ───────────────────────────
+    if (!signals) {
+      const hitsEl = tagDetail.querySelector<HTMLElement>('gtag-hits-ng')
+      if (hitsEl) {
+        const chips = hitsEl.querySelectorAll<HTMLElement>('span.param-chip, [class*="param-chip"]')
+        for (const chip of chips) {
+          if (chip.dataset.amdGcsRead) continue
+          if (chip.textContent?.trim() !== 'gcs') continue
+          chip.dataset.amdGcsRead = '1'
+          const valueTd = chip.closest('td')?.nextElementSibling as HTMLElement | null
+          const val = valueTd?.textContent?.trim() ?? ''
+          if (/^G\d+/i.test(val)) { signals = decodeGcs(val); break }
+        }
+      }
+    }
+
+    // ── 3. Broad fallback: any td/cell with text "gcs" ────────────────────
+    if (!signals) {
+      const allCells = tagDetail.querySelectorAll<HTMLElement>(
+        'td, [class*="table-cell"], [class*="TableCell"]',
+      )
+      for (const cell of allCells) {
+        if (cell.dataset.amdGcsRead) continue
+        if (!/^\s*gcs\s*$/.test(cell.textContent ?? '')) continue
+        cell.dataset.amdGcsRead = '1'
+        const valueCell = cell.nextElementSibling as HTMLElement | null
+        const val = valueCell?.textContent?.trim() ?? ''
+        if (/^G\d+/i.test(val)) { signals = decodeGcs(val); break }
+      }
+    }
+
+    if (!signals) continue
+
+    tagDetail.dataset.amdConsentDone = '1'
+
+    // Build badge row
+    const wrap = makeConsentBadges(signals)
+    wrap.style.cssText = 'padding:4px 14px 7px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;'
+    const label = document.createElement('span')
+    label.textContent = 'Consent:'
+    label.style.cssText = 'font:600 10px/1 system-ui,sans-serif; color:#5f6368; text-transform:uppercase; letter-spacing:.06em; flex-shrink:0;'
+    wrap.prepend(label)
+
+    // Inject immediately after the "Properties" pane header
+    const propsHeader = [...tagDetail.querySelectorAll<HTMLElement>('[class*="pane-header"]')]
+      .find(el => /^\s*properties\s*$/i.test(el.textContent ?? ''))
+
+    if (propsHeader) {
+      const parent = propsHeader.parentElement!
+      parent.classList.add('amd-consent-host')
+      propsHeader.insertAdjacentElement('afterend', wrap)
+    } else {
+      // Fallback: top of sheet card
+      const target = tagDetail.querySelector<HTMLElement>('.gtm-sheet-card, .sheet-content') ?? tagDetail
+      target.classList.add('amd-consent-host')
+      target.prepend(wrap)
+    }
+  }
+}
+
+// ── URL parameter formatter ───────────────────────────────────────────────────
+
+// Targets the URL cell adjacent to the method cell in http-url-details (sGTM)
+// and in the HTTP Request Details modal. Parses query params into a table.
+const URL_CELL_SEL = '.gtm-debug-table-cell--query-param + .gtm-debug-table-cell pre'
+
+function formatUrlCells() {
+  const cells = document.querySelectorAll<HTMLElement>(URL_CELL_SEL)
+  for (const pre of cells) {
+    if (pre.dataset.amdUrlFmt) continue
+    const raw = pre.textContent?.trim() ?? ''
+    if (!raw.startsWith('http')) continue
+
+    const qIdx = raw.indexOf('?')
+    if (qIdx === -1) { pre.dataset.amdUrlFmt = 'skip'; continue }
+
+    try {
+      const url = new URL(raw)
+      const params = [...url.searchParams.entries()]
+      if (params.length === 0) { pre.dataset.amdUrlFmt = 'skip'; continue }
+
+      const esc = (s: string) =>
+        s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+      const container = document.createElement('div')
+      container.className = 'amd-url-fmt'
+
+      // Header: base URL + copy button
+      const hdr = document.createElement('div')
+      hdr.className = 'amd-url-fmt-header'
+      const base = document.createElement('span')
+      base.className = 'amd-url-fmt-base'
+      base.textContent = url.origin + url.pathname
+      const copyBtn = document.createElement('button')
+      copyBtn.type = 'button'
+      copyBtn.className = 'amd-json-copy'
+      copyBtn.textContent = 'Copia URL'
+      copyBtn.onclick = (e: MouseEvent) => {
+        e.stopPropagation()
+        navigator.clipboard.writeText(raw).then(() => {
+          copyBtn.textContent = '✓ Copiato'
+          setTimeout(() => { copyBtn.textContent = 'Copia URL' }, 1500)
+        }).catch(() => {
+          copyBtn.textContent = '✗ Errore'
+          setTimeout(() => { copyBtn.textContent = 'Copia URL' }, 1500)
+        })
+      }
+      hdr.appendChild(base)
+      hdr.appendChild(copyBtn)
+      container.appendChild(hdr)
+
+      // Parameters table
+      const table = document.createElement('table')
+      table.className = 'amd-url-params'
+      for (const [key, value] of params) {
+        const tr = document.createElement('tr')
+        let decoded = value
+        try { decoded = decodeURIComponent(value) } catch { /* keep raw */ }
+        tr.innerHTML = `<td class="amd-url-key">${esc(key)}</td><td class="amd-url-val">${esc(decoded)}</td>`
+        table.appendChild(tr)
+
+        // Consent Mode Monitor: decode gcs inline
+        if (key === 'gcs') {
+          const signals = decodeGcs(value)
+          if (signals) {
+            const consentRow = document.createElement('tr')
+            const td = document.createElement('td')
+            td.colSpan = 2
+            td.style.padding = '2px 10px 6px'
+            td.appendChild(makeConsentBadges(signals))
+            consentRow.appendChild(td)
+            table.appendChild(consentRow)
+          }
+        }
+      }
+      container.appendChild(table)
+
+      pre.insertAdjacentElement('beforebegin', container)
+      pre.style.display = 'none'
+      pre.dataset.amdUrlFmt = '1'
+    } catch {
+      pre.dataset.amdUrlFmt = 'skip'
+    }
+  }
+}
+
 // ── Main sync ─────────────────────────────────────────────────────────────────
+
 
 /** Idempotent: safe on every Angular re-render. */
 function sync() {
@@ -638,6 +1106,12 @@ function sync() {
 
   // Variables tab panel (independent injection point)
   injectVarSearch()
+
+  // Tag type coloring + failed highlighting + JSON formatter + URL param formatter
+  colorTagCards()
+  formatJsonCells()
+  formatUrlCells()
+  formatConsentBadges()
 }
 
 let scheduled = false
@@ -645,7 +1119,7 @@ let discovered = false
 const observer = new MutationObserver((muts) => {
   const ours = muts.every((m) => {
     const t = m.target as HTMLElement
-    return !!t.closest?.(`#${ROOT_ID}, #${PINNED_ID}, #${VAR_ROOT_ID}, #amd-ta-style`)
+    return !!t.closest?.(`#${ROOT_ID}, #${PINNED_ID}, #${VAR_ROOT_ID}, #amd-ta-style, .amd-json-copy, .amd-url-fmt, .amd-gcs-val, .amd-consent-host`)
   })
   if (ours || scheduled) return
   scheduled = true

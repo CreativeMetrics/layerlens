@@ -1,5 +1,5 @@
 import * as storage from '@/lib/storage'
-import type { StorageSchema } from '@/lib/storage'
+import type { GtmManualInjection, StorageSchema } from '@/lib/storage'
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T | null
 
@@ -536,6 +536,116 @@ function stopLiveIfOn() {
   }
 }
 
+/* ---------- manual GTM injection ---------- */
+
+/** Convert a glob-style pattern to a RegExp string.
+ *  Supports: * (any chars), ? (single char). Matches against the full URL. */
+function patternToRegExp(pattern: string): string {
+  const escaped = pattern
+    .trim()
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape regex special chars (except * and ?)
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.')
+  return escaped
+}
+
+function renderInjList(injections: GtmManualInjection[]) {
+  const list = $('inj-list')
+  if (!list) return
+  list.innerHTML = ''
+  if (injections.length === 0) {
+    const empty = document.createElement('p')
+    empty.className = 'inj-empty'
+    empty.textContent = 'Nessuna regola configurata'
+    list.appendChild(empty)
+    return
+  }
+  for (const inj of injections) {
+    const item = document.createElement('div')
+    item.className = 'inj-list-item'
+    item.dataset.id = inj.id
+
+    const info = document.createElement('div')
+    info.className = 'inj-item-info'
+    const gtmSpan = document.createElement('div')
+    gtmSpan.className = 'inj-item-gtm'
+    gtmSpan.textContent = inj.gtmId
+    const patSpan = document.createElement('div')
+    patSpan.className = 'inj-item-pattern'
+    patSpan.textContent = inj.pattern
+    patSpan.title = inj.pattern
+    info.appendChild(gtmSpan)
+    info.appendChild(patSpan)
+
+    const toggleLabel = document.createElement('label')
+    toggleLabel.className = 'inj-toggle'
+    const toggleInput = document.createElement('input')
+    toggleInput.type = 'checkbox'
+    toggleInput.checked = inj.enabled
+    const track = document.createElement('span')
+    track.className = 'inj-toggle-track'
+    toggleLabel.appendChild(toggleInput)
+    toggleLabel.appendChild(track)
+    toggleInput.addEventListener('change', async () => {
+      const all = (await storage.get('gtm_manual_injections')) ?? []
+      const idx = all.findIndex((x) => x.id === inj.id)
+      if (idx >= 0) { all[idx].enabled = toggleInput.checked; await storage.set({ gtm_manual_injections: all }) }
+    })
+
+    const delBtn = document.createElement('button')
+    delBtn.className = 'inj-del'
+    delBtn.title = 'Elimina'
+    delBtn.textContent = '×'
+    delBtn.addEventListener('click', async () => {
+      const all = (await storage.get('gtm_manual_injections')) ?? []
+      await storage.set({ gtm_manual_injections: all.filter((x) => x.id !== inj.id) })
+      item.remove()
+      const remaining = list.querySelectorAll('.inj-list-item')
+      if (remaining.length === 0) renderInjList([])
+    })
+
+    item.appendChild(info)
+    item.appendChild(toggleLabel)
+    item.appendChild(delBtn)
+    list.appendChild(item)
+  }
+}
+
+async function bindInjection() {
+  const injections = (await storage.get('gtm_manual_injections')) ?? []
+  renderInjList(injections)
+
+  $('inj-add')?.addEventListener('click', async () => {
+    const gtmInput = $('inj-gtm-id') as HTMLInputElement | null
+    const patInput = $('inj-pattern') as HTMLInputElement | null
+    if (!gtmInput || !patInput) return
+
+    const gtmId = gtmInput.value.trim().toUpperCase()
+    const pattern = patInput.value.trim()
+    if (!gtmId.match(/^GTM-[A-Z0-9]+$/) || !pattern) {
+      gtmInput.style.borderColor = gtmId.match(/^GTM-[A-Z0-9]+$/) ? '' : '#c5221f'
+      patInput.style.borderColor = pattern ? '' : '#c5221f'
+      return
+    }
+    gtmInput.style.borderColor = ''
+    patInput.style.borderColor = ''
+
+    const newEntry: GtmManualInjection = {
+      id: String(Date.now()),
+      gtmId,
+      pattern,
+      regExp: patternToRegExp(pattern),
+      enabled: true,
+    }
+    const all = (await storage.get('gtm_manual_injections')) ?? []
+    all.push(newEntry)
+    await storage.set({ gtm_manual_injections: all })
+    gtmInput.value = ''
+    patInput.value = ''
+    renderInjList(all)
+  })
+}
+
 /* ---------- init ---------- */
 async function init() {
   // Load persisted session state first so pins and history are ready before
@@ -545,5 +655,6 @@ async function init() {
   await bindToggle('block_page_change')
   bindSettings()
   bindDataLayer()
+  await bindInjection()
 }
 void init()

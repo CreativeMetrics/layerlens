@@ -309,25 +309,27 @@ function shopifyPixelSandboxWrapper(): void {
     const dl = win['dataLayer'] as (unknown[] & { __llSandboxWrapped?: boolean }) | undefined
     if (!Array.isArray(dl) || dl.__llSandboxWrapped) return
 
-    // If the iframe's dataLayer IS the parent's dataLayer (same-origin sandbox that
-    // references window.top.dataLayer), events are already there — don't forward.
     try {
       if (dl === (window.top as unknown as Record<string, unknown>)['dataLayer']) return
     } catch { /* cross-origin — proceed */ }
 
+    Object.defineProperty(dl, '__llSandboxWrapped', { value: true, enumerable: false })
+
     for (const item of dl) {
-      if (!isInternal(item) && !isArgs(item)) send(item)
+      if (!isInternal(item) && !isArgs(item) && typeof item !== 'function') send(item)
     }
 
-    const orig = Array.prototype.push.bind(dl)
-    ;(dl as unknown as Record<string, unknown>)['push'] = function (...args: unknown[]): number {
-      const r = orig(...args) as number
-      for (const item of args) {
-        if (!isInternal(item) && !isArgs(item)) send(item)
-      }
-      return r
+    // Stape GTM Helper pattern: capture current push, try to forward, always call original.
+    const origPush = (dl as unknown as Record<string, unknown>)['push'] as ((...a: unknown[]) => number) | undefined
+    ;(dl as unknown as Record<string, unknown>)['push'] = function (this: unknown): number {
+      const args = Array.from(arguments) as unknown[]
+      try {
+        for (const item of args) {
+          if (!isInternal(item) && !isArgs(item) && typeof item !== 'function') send(item)
+        }
+      } catch { /* ignore */ }
+      return origPush ? origPush.apply(dl, args) : (Array.prototype.push.apply(dl, args) as number)
     }
-    Object.defineProperty(dl, '__llSandboxWrapped', { value: true, enumerable: false })
   }
 
   // Listen for ACK/SYN from parent
@@ -444,6 +446,35 @@ async function injectGtmIntoMainFrame(tabId: number, gtmId: string): Promise<voi
   }
 }
 
+// ── Manual GTM injection (user-configured from popup) ────────────────────────
+// Completely separate from the Shopify-specific auto-injection above.
+// Checks user-saved rules in storage and injects the specified GTM container
+// into any matching main frame. Idempotent: skips if GTM is already present.
+
+async function injectGtmManual(tabId: number, gtmId: string): Promise<void> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: (id: string) => {
+        const win = window as unknown as Record<string, unknown>
+        if (win['__llManualGtmInjected']) return
+        const existing = win['google_tag_manager'] as Record<string, unknown> | undefined
+        if (existing && Object.keys(existing).some((k) => k.startsWith('GTM-'))) return
+        win['__llManualGtmInjected'] = true
+        if (!Array.isArray(win['dataLayer'])) win['dataLayer'] = []
+        ;(win['dataLayer'] as unknown[]).push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' })
+        const s = document.createElement('script')
+        s.async = true
+        s.src = `https://www.googletagmanager.com/gtm.js?id=${id}`
+        ;(document.head ?? document.documentElement).appendChild(s)
+      },
+      args: [gtmId],
+      injectImmediately: true,
+      world: 'MAIN',
+    })
+  } catch { /* tab navigated away or access denied — harmless */ }
+}
+
 // ── webNavigation.onDOMContentLoaded — early GTM injection on checkout ───────
 // Inject GTM at DOMContentLoaded (before Shopify's JS creates the pixel sandbox
 // iframes). This way GTM's debug bootstrap runs with no sandboxed frames in the
@@ -453,7 +484,24 @@ async function injectGtmIntoMainFrame(tabId: number, gtmId: string): Promise<voi
 
 chrome.webNavigation.onDOMContentLoaded.addListener(async (details) => {
   const { tabId, frameId, url } = details
-  if (frameId !== 0 || !isShopifyCheckoutUrl(url)) return
+  if (frameId !== 0) return
+
+  // ── Manual GTM injection (user rules, non-Shopify) ─────────────────────────
+  const manualInjections = await storage.get('gtm_manual_injections')
+  if (manualInjections?.length) {
+    for (const cfg of manualInjections) {
+      if (!cfg.enabled) continue
+      try {
+        if (new RegExp(cfg.regExp, 'i').test(url)) {
+          await injectGtmManual(tabId, cfg.gtmId)
+          break // first matching rule wins
+        }
+      } catch { /* invalid regex — skip */ }
+    }
+  }
+
+  // ── Shopify checkout: inject GTM from cached ID ────────────────────────────
+  if (!isShopifyCheckoutUrl(url)) return
   try {
     const origin = new URL(url).origin
 

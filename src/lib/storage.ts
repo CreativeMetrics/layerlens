@@ -4,6 +4,16 @@
 
 import type { FiltersConfiguration } from '@/lib/filters-schema'
 
+export interface GtmManualInjection {
+  id: string
+  gtmId: string
+  /** Human-readable pattern as typed by the user (e.g. "*.example.com"). */
+  pattern: string
+  /** Compiled RegExp string for matching against full URLs. */
+  regExp: string
+  enabled: boolean
+}
+
 export interface StorageSchema {
   filters_configuration: FiltersConfiguration
   gtm_sites: Array<{ url: string; origin: string; gtm_ids: string[]; time: number; sent: boolean }>
@@ -15,6 +25,8 @@ export interface StorageSchema {
   variable_type_labels: Record<string, string>
   new_version_available: string | null
   ext_version: string
+  /** Manual GTM injection rules configured from the popup. */
+  gtm_manual_injections: GtmManualInjection[]
 }
 
 export async function get<K extends keyof StorageSchema>(

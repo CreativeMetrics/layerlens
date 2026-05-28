@@ -3,9 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <title>LayerLens</title>
-    <script type="module" crossorigin src="/assets/index.html-DVqg4Mgl.js"></script>
+    <script type="module" crossorigin src="/assets/index.html-D1r8kNK6.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/storage-DQyFDKmw.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-2QxV_qO0.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-DumIAnPB.css">
   </head>
   <body>
     <main class="app">
@@ -63,6 +63,19 @@
 
         <section class="settings" id="settings" hidden>
           <p class="muted small">Le etichette dei tipi di variabile si configurano direttamente nell'interfaccia di GTM, nella barra dei filtri.</p>
+
+          <!-- Manual GTM injection -->
+          <div class="inj-section">
+            <div class="inj-title">Injection GTM manuale</div>
+            <p class="muted small" style="margin:4px 0 8px">Inietta GTM su pagine senza container nativo. Separato dall'injection automatica Shopify.</p>
+            <div id="inj-list"></div>
+            <div class="inj-form">
+              <input id="inj-gtm-id" type="text" placeholder="GTM-XXXXXX" maxlength="20" class="inj-input" spellcheck="false" />
+              <input id="inj-pattern" type="text" placeholder="*.esempio.com" class="inj-input" spellcheck="false" />
+              <button id="inj-add" class="inj-add">Aggiungi</button>
+            </div>
+          </div>
+
           <div class="settings-meta"><span>Versione</span><span id="ext-version">—</span></div>
         </section>
       </div>
