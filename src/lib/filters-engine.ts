@@ -12,10 +12,12 @@ export interface FilterState {
   selectedTypes: Set<string>
   /** Free-text query matched against the element name (case-insensitive). */
   query: string
+  /** Pause visibility filter — only meaningful on the TAGS page. */
+  pauseFilter: 'all' | 'paused' | 'active'
 }
 
 export function emptyState(): FilterState {
-  return { selectedTypes: new Set(), query: '' }
+  return { selectedTypes: new Set(), query: '', pauseFilter: 'all' }
 }
 
 /** A single type entry for the chip UI: stable code, localised label, count. */
@@ -47,6 +49,8 @@ export function matches(row: GtmRow, state: FilterState): boolean {
   if (state.selectedTypes.size > 0 && !state.selectedTypes.has(row.type)) return false
   const q = state.query.trim().toLowerCase()
   if (q && !row.name.toLowerCase().includes(q)) return false
+  if (state.pauseFilter === 'paused' && !row.paused) return false
+  if (state.pauseFilter === 'active' && row.paused) return false
   return true
 }
 

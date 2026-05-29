@@ -57,21 +57,26 @@ function selectionKey(page: PageType) {
 function persistSelection() {
   if (currentPage === '') return
   try {
-    sessionStorage.setItem(selectionKey(currentPage), JSON.stringify([...state.selectedTypes]))
-  } catch {
-    /* sessionStorage may be unavailable; ignore */
-  }
+    sessionStorage.setItem(selectionKey(currentPage), JSON.stringify({
+      types: [...state.selectedTypes],
+      pauseFilter: state.pauseFilter,
+    }))
+  } catch { /* sessionStorage may be unavailable; ignore */ }
 }
 function restoreSelection(page: Exclude<PageType, ''>, available: Set<string>) {
   try {
     const raw = sessionStorage.getItem(selectionKey(page))
     if (!raw) return
-    const saved = JSON.parse(raw) as string[]
-    // only restore types that still exist on the page
-    state.selectedTypes = new Set(saved.filter((t) => available.has(t)))
-  } catch {
-    /* ignore */
-  }
+    const saved = JSON.parse(raw) as unknown
+    // Support both old format (plain array) and new format ({types, pauseFilter})
+    if (Array.isArray(saved)) {
+      state.selectedTypes = new Set((saved as string[]).filter((t) => available.has(t)))
+    } else if (saved && typeof saved === 'object') {
+      const s = saved as { types?: string[]; pauseFilter?: string }
+      if (Array.isArray(s.types)) state.selectedTypes = new Set(s.types.filter((t) => available.has(t)))
+      if (s.pauseFilter === 'paused' || s.pauseFilter === 'active') state.pauseFilter = s.pauseFilter
+    }
+  } catch { /* ignore */ }
 }
 
 // Live variable-label overrides (kept in sync via the content-script bridge).
@@ -108,36 +113,36 @@ function injectStyleOnce() {
       padding: 10px 14px; margin: 0 0 6px;
       border-bottom: 1px solid rgba(0,0,0,.07);
       font: 13px/1.4 system-ui, Roboto, Arial, sans-serif;
+      position: relative;
     }
-    #${TOOLBAR_ID} .amd-hint { font-weight: 600; color: #3c4043; margin-right: 4px; letter-spacing: -.01em; }
-    #${TOOLBAR_ID} .amd-chips { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
-    #${TOOLBAR_ID} .amd-chip-search {
-      flex: 0 0 150px; padding: 6px 11px; border: 1px solid rgba(0,0,0,.14);
-      border-radius: 9px; font-size: 13px; outline: none; transition: border-color .12s, box-shadow .12s;
-    }
-    #${TOOLBAR_ID} .amd-chip-search:focus { border-color: #e5c614; box-shadow: 0 0 0 3px rgba(229,198,20,.25); }
-    #${TOOLBAR_ID} .amd-builtin-toggle {
-      background: #fff; border: 1px solid rgba(0,0,0,.14); border-radius: 9px;
-      padding: 6px 12px; color: #3c4043; cursor: pointer; font-size: 13px; font-weight: 500;
+    /* ── filter trigger button ─────────────────────────────────── */
+    #${TOOLBAR_ID} .amd-filter-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 11px; border: 1px solid rgba(0,0,0,.18); border-radius: 9px;
+      background: #fff; color: #3c4043; cursor: pointer; font-size: 13px; font-weight: 500;
       transition: background .12s, border-color .12s;
+      white-space: nowrap;
     }
-    #${TOOLBAR_ID} .amd-builtin-toggle:hover { background: #faf6da; border-color: #e5c614; }
-    #${TOOLBAR_ID} .amd-chip {
-      display: inline-flex; align-items: center; gap: 5px;
-      padding: 6px 12px; border: 1px solid rgba(0,0,0,.14);
-      border-radius: 999px; background: #fff; cursor: pointer; user-select: none;
-      white-space: nowrap; font-size: 13px; color: #3c4043;
-      transition: background .12s, border-color .12s, color .12s, transform .06s;
+    #${TOOLBAR_ID} .amd-filter-btn:hover { background: #faf6da; border-color: #e5c614; }
+    #${TOOLBAR_ID} .amd-filter-btn.active { background: #e5c614; border-color: #e5c614; color: #2c2c2a; }
+    #${TOOLBAR_ID} .amd-filter-btn .amd-filter-badge {
+      background: #2c2c2a; color: #fff; border-radius: 999px;
+      font-size: 11px; font-weight: 700; padding: 0 5px; min-width: 16px; text-align: center;
     }
-    #${TOOLBAR_ID} .amd-chip:hover { border-color: #e5c614; background: #faf6da; }
-    #${TOOLBAR_ID} .amd-chip:active { transform: scale(.97); }
-    #${TOOLBAR_ID} .amd-chip[aria-pressed="true"] {
-      background: #e5c614; border-color: #e5c614; color: #2c2c2a; font-weight: 600;
+    #${TOOLBAR_ID} .amd-filter-btn.active .amd-filter-badge { background: rgba(0,0,0,.25); color: #fff; }
+    #${TOOLBAR_ID} .amd-filter-arrow { font-size: 10px; opacity: .6; }
+    /* ── active type chips (inline, removable) ──────────────────── */
+    #${TOOLBAR_ID} .amd-active-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+    #${TOOLBAR_ID} .amd-active-chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 9px; border: 1px solid #e5c614; border-radius: 999px;
+      background: #fffae6; color: #2c2c2a; font-size: 12px; font-weight: 500;
+      white-space: nowrap; cursor: pointer;
+      transition: background .1s;
     }
-    #${TOOLBAR_ID} .amd-chip[aria-pressed="true"]:hover { filter: brightness(.96); }
-    #${TOOLBAR_ID} .amd-chip .amd-count {
-      opacity: .7; font-variant-numeric: tabular-nums; font-size: 12px;
-    }
+    #${TOOLBAR_ID} .amd-active-chip:hover { background: #fef0b0; }
+    #${TOOLBAR_ID} .amd-active-chip .amd-chip-x { opacity: .5; font-size: 11px; margin-left: 1px; }
+    /* ── counter + secondary buttons ───────────────────────────── */
     #${TOOLBAR_ID} .amd-visible-count {
       margin-left: auto; font-size: 12px; color: #5f6368; font-variant-numeric: tabular-nums;
       white-space: nowrap;
@@ -147,7 +152,77 @@ function injectStyleOnce() {
       background: none; border: none; color: #5f6368;
       cursor: pointer; font-size: 13px; font-weight: 500; padding: 6px 4px;
     }
-    #${TOOLBAR_ID} .amd-clear:hover { color: #2c2c2a; text-decoration: underline; }
+    #${TOOLBAR_ID} .amd-clear:hover { color: #c5221f; text-decoration: underline; }
+    #${TOOLBAR_ID} .amd-builtin-toggle {
+      background: #fff; border: 1px solid rgba(0,0,0,.14); border-radius: 9px;
+      padding: 6px 12px; color: #3c4043; cursor: pointer; font-size: 13px; font-weight: 500;
+      transition: background .12s, border-color .12s;
+    }
+    #${TOOLBAR_ID} .amd-builtin-toggle:hover { background: #faf6da; border-color: #e5c614; }
+    /* ── dropdown panel ─────────────────────────────────────────── */
+    #${TOOLBAR_ID} .amd-dropdown {
+      position: absolute; top: calc(100% + 2px); left: 14px;
+      width: 360px; background: #fff; border: 1px solid rgba(0,0,0,.15);
+      border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.13);
+      z-index: 9000; overflow: hidden;
+      display: none;
+    }
+    #${TOOLBAR_ID} .amd-dropdown.open { display: block; }
+    .amd-dropdown-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 9px 12px; border-bottom: 1px solid rgba(0,0,0,.07);
+      font-weight: 600; font-size: 12px; color: #5f6368; text-transform: uppercase; letter-spacing: .06em;
+    }
+    .amd-dropdown-close {
+      background: none; border: none; cursor: pointer; color: #5f6368;
+      font-size: 16px; line-height: 1; padding: 0 2px;
+    }
+    .amd-dropdown-close:hover { color: #2c2c2a; }
+    .amd-dropdown-search {
+      width: 100%; padding: 8px 12px; border: none; border-bottom: 1px solid rgba(0,0,0,.07);
+      font-size: 13px; outline: none; box-sizing: border-box;
+    }
+    .amd-dropdown-search:focus { background: #fffdf0; }
+    .amd-dropdown-types {
+      max-height: 220px; overflow-y: auto;
+      padding: 4px 0;
+    }
+    .amd-dropdown-check {
+      display: flex; align-items: center; gap: 9px;
+      padding: 6px 12px; cursor: pointer; font-size: 13px; color: #3c4043;
+      transition: background .1s;
+    }
+    .amd-dropdown-check:hover { background: #f8f9fa; }
+    .amd-dropdown-check input[type="checkbox"] {
+      width: 14px; height: 14px; accent-color: #e5c614; cursor: pointer; flex-shrink: 0;
+    }
+    .amd-dropdown-check .amd-dc-name { flex: 1; }
+    .amd-dropdown-check .amd-dc-count { font-size: 12px; color: #5f6368; }
+    .amd-dropdown-sep { border: none; border-top: 1px solid rgba(0,0,0,.07); margin: 4px 0; }
+    .amd-dropdown-section-label {
+      padding: 6px 12px 3px; font-size: 11px; font-weight: 600;
+      color: #5f6368; text-transform: uppercase; letter-spacing: .06em;
+    }
+    .amd-dropdown-radio {
+      display: flex; gap: 6px; padding: 5px 12px 8px;
+    }
+    .amd-dropdown-radio label {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 13px; color: #3c4043; cursor: pointer; padding: 4px 8px;
+      border: 1px solid rgba(0,0,0,.14); border-radius: 9px; background: #fff;
+      transition: background .1s, border-color .1s;
+    }
+    .amd-dropdown-radio label:hover { background: #faf6da; border-color: #e5c614; }
+    .amd-dropdown-radio input[type="radio"] { accent-color: #e5c614; cursor: pointer; }
+    .amd-dropdown-radio label:has(input:checked) { background: #e5c614; border-color: #e5c614; font-weight: 600; }
+    .amd-dropdown-footer {
+      padding: 8px 12px; border-top: 1px solid rgba(0,0,0,.07); text-align: right;
+    }
+    .amd-dropdown-reset {
+      background: none; border: none; color: #5f6368; cursor: pointer;
+      font-size: 13px; font-weight: 500; padding: 4px 6px;
+    }
+    .amd-dropdown-reset:hover { color: #c5221f; text-decoration: underline; }
   `
   document.head.appendChild(style)
 
@@ -498,95 +573,280 @@ function renderToolbar(rows: GtmRow[]) {
   }
   bar.replaceChildren()
 
-  // Name search is intentionally delegated to GTM's native search box (it works
-  // in any language and composes with our type filter: a row shows only if it
-  // passes BOTH). Our toolbar handles ONLY the type dimension.
-  const hint = document.createElement('span')
-  hint.className = 'amd-hint'
-  hint.textContent = 'Filtra per tipo:'
-  bar.appendChild(hint)
-
-  // type chips, populated from the types actually present
   let facets: ReturnType<typeof facetsFromRows> = []
-  try {
-    facets = facetsFromRows(rows)
-  } catch (err) {
-    console.warn('[Andromeda QoL] facet build failed', err)
+  try { facets = facetsFromRows(rows) } catch { /* ignore */ }
+
+  if (currentPage !== '' && state.selectedTypes.size === 0 && state.pauseFilter === 'all')
+    restoreSelection(currentPage as Exclude<PageType, ''>, new Set(facets.map((f) => f.type)))
+
+  const commit = () => {
+    persistSelection()
+    applyToDom(getRowElements(currentPage as Exclude<PageType, ''>))
+    renderBar()
   }
 
-  // Restore a saved selection for this page (only types still present).
-  if (currentPage !== '' && state.selectedTypes.size === 0)
-    restoreSelection(
-      currentPage as Exclude<PageType, ''>,
-      new Set(facets.map((f) => f.type)),
-    )
+  // ── dropdown ──────────────────────────────────────────────────────────────────
+  const dropdown = document.createElement('div')
+  dropdown.className = 'amd-dropdown'
 
-  // Many types? Chips wrap onto multiple lines (the bar already flex-wraps) and
-  // a search-as-you-type box narrows the chip set itself, so a container with
-  // dozens of variable types stays manageable.
-  const chipWrap = document.createElement('div')
-  chipWrap.className = 'amd-chips'
-  bar.appendChild(chipWrap)
+  const ddHead = document.createElement('div')
+  ddHead.className = 'amd-dropdown-head'
+  ddHead.textContent = 'Filtri'
+  const ddClose = document.createElement('button')
+  ddClose.type = 'button'
+  ddClose.className = 'amd-dropdown-close'
+  ddClose.textContent = '×'
+  ddClose.addEventListener('click', () => dropdown.classList.remove('open'))
+  ddHead.appendChild(ddClose)
+  dropdown.appendChild(ddHead)
 
-  const renderChips = (textFilter = '') => {
-    chipWrap.replaceChildren()
-    const q = textFilter.trim().toLowerCase()
-    const visible = q ? facets.filter((f) => f.displayName.toLowerCase().includes(q)) : facets
+  const ddSearch = document.createElement('input')
+  ddSearch.type = 'search'
+  ddSearch.className = 'amd-dropdown-search'
+  ddSearch.placeholder = 'Cerca tipo…'
+  dropdown.appendChild(ddSearch)
+
+  const ddTypes = document.createElement('div')
+  ddTypes.className = 'amd-dropdown-types'
+  dropdown.appendChild(ddTypes)
+
+  const renderDdTypes = (q = '') => {
+    ddTypes.replaceChildren()
+    const lq = q.trim().toLowerCase()
+    const visible = lq ? facets.filter((f) => f.displayName.toLowerCase().includes(lq)) : facets
     for (const facet of visible) {
-      const chip = document.createElement('button')
-      chip.type = 'button'
-      chip.className = 'amd-chip'
-      chip.setAttribute('aria-pressed', String(state.selectedTypes.has(facet.type)))
-      chip.title = facet.type
-      const label = document.createElement('span')
-      label.className = 'amd-label'
-      label.textContent = facet.displayName
-      const count = document.createElement('span')
-      count.className = 'amd-count'
-      count.textContent = `(${facet.count})` // count per type in parentheses
-      chip.append(label, document.createTextNode(' '), count)
-      chip.addEventListener('click', () => {
-        if (state.selectedTypes.has(facet.type)) state.selectedTypes.delete(facet.type)
-        else state.selectedTypes.add(facet.type)
-        chip.setAttribute('aria-pressed', String(state.selectedTypes.has(facet.type)))
-        persistSelection()
-        applyToDom(getRowElements(currentPage as Exclude<PageType, ''>))
+      const row = document.createElement('label')
+      row.className = 'amd-dropdown-check'
+      const cb = document.createElement('input')
+      cb.type = 'checkbox'
+      cb.checked = state.selectedTypes.has(facet.type)
+      cb.addEventListener('change', () => {
+        if (cb.checked) state.selectedTypes.add(facet.type)
+        else state.selectedTypes.delete(facet.type)
+        commit()
       })
-      chipWrap.appendChild(chip)
+      const name = document.createElement('span')
+      name.className = 'amd-dc-name'
+      name.textContent = facet.displayName
+      const cnt = document.createElement('span')
+      cnt.className = 'amd-dc-count'
+      cnt.textContent = `${facet.count}`
+      row.append(cb, name, cnt)
+      ddTypes.appendChild(row)
+    }
+    if (!visible.length) {
+      const empty = document.createElement('div')
+      empty.style.cssText = 'padding:10px 12px; color:#5f6368; font-size:13px;'
+      empty.textContent = 'Nessun tipo trovato'
+      ddTypes.appendChild(empty)
     }
   }
+  ddSearch.addEventListener('input', () => renderDdTypes(ddSearch.value))
+  renderDdTypes()
 
-  // When there are many types, offer a quick filter for the chips themselves.
-  if (facets.length > 12) {
-    const chipSearch = document.createElement('input')
-    chipSearch.type = 'search'
-    chipSearch.className = 'amd-chip-search'
-    chipSearch.placeholder = 'filtra tipi…'
-    chipSearch.addEventListener('input', () => renderChips(chipSearch.value))
-    bar.insertBefore(chipSearch, chipWrap)
+  // Pause filter (TAGS only)
+  if (currentPage === 'TAGS') {
+    const sep = document.createElement('hr')
+    sep.className = 'amd-dropdown-sep'
+    dropdown.appendChild(sep)
+
+    const pauseLabel = document.createElement('div')
+    pauseLabel.className = 'amd-dropdown-section-label'
+    pauseLabel.textContent = 'Stato'
+    dropdown.appendChild(pauseLabel)
+
+    const radioGroup = document.createElement('div')
+    radioGroup.className = 'amd-dropdown-radio'
+    const options: Array<[string, string]> = [['all', 'Tutti'], ['active', 'Solo attivi'], ['paused', 'Solo in pausa']]
+    for (const [val, label] of options) {
+      const lbl = document.createElement('label')
+      const rb = document.createElement('input')
+      rb.type = 'radio'
+      rb.name = 'amd-pause-filter'
+      rb.value = val
+      rb.checked = state.pauseFilter === val
+      rb.addEventListener('change', () => {
+        if (rb.checked) {
+          state.pauseFilter = val as 'all' | 'paused' | 'active'
+          commit()
+          radioGroup.querySelectorAll<HTMLInputElement>('input[type="radio"]').forEach((r) => {
+            r.closest('label')?.classList.toggle('checked', r.checked)
+          })
+        }
+      })
+      lbl.append(rb, label)
+      radioGroup.appendChild(lbl)
+    }
+    dropdown.appendChild(radioGroup)
   }
-  renderChips()
 
-  // Live "X di Y visibili" counter.
-  const counter = document.createElement('span')
-  counter.id = 'amd-visible-count'
-  counter.className = 'amd-visible-count'
-  bar.appendChild(counter)
-
-  // clear all
-  const clear = document.createElement('button')
-  clear.type = 'button'
-  clear.className = 'amd-clear'
-  clear.textContent = 'Azzera filtri'
-  clear.addEventListener('click', () => {
+  const ddFooter = document.createElement('div')
+  ddFooter.className = 'amd-dropdown-footer'
+  const ddReset = document.createElement('button')
+  ddReset.type = 'button'
+  ddReset.className = 'amd-dropdown-reset'
+  ddReset.textContent = 'Azzera tutti i filtri'
+  ddReset.addEventListener('click', () => {
     state = emptyState()
-    persistSelection() // clears the saved selection too
-    sync(true)
+    dropdown.classList.remove('open')
+    commit()
+    renderDdTypes(ddSearch.value)
   })
-  bar.appendChild(clear)
+  ddFooter.appendChild(ddReset)
+  dropdown.appendChild(ddFooter)
 
-  // Keep the counter in sync with GTM's own native name-search box, which hides
-  // rows independently of us. Debounced via rAF to avoid thrashing while typing.
+  // ── bar content ───────────────────────────────────────────────────────────────
+  const renderBar = () => {
+    // Remove all children except the dropdown (re-added at end)
+    bar!.replaceChildren()
+
+    const activeCount = state.selectedTypes.size + (state.pauseFilter !== 'all' ? 1 : 0)
+
+    // Filter trigger button
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'amd-filter-btn' + (activeCount > 0 ? ' active' : '')
+
+    // SVG funnel icon
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('viewBox', '0 0 16 16')
+    svg.setAttribute('width', '14')
+    svg.setAttribute('height', '14')
+    svg.setAttribute('fill', 'currentColor')
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('d', 'M1 1.5A.5.5 0 0 1 1.5 1h13a.5.5 0 0 1 .4.8L9.5 9.3V14a.5.5 0 0 1-.7.5l-3-1.5A.5.5 0 0 1 5.5 12.5V9.3L1.1 2.3A.5.5 0 0 1 1 1.5z')
+    svg.appendChild(path)
+    btn.appendChild(svg)
+
+    const btnLabel = document.createTextNode(' Filtri')
+    btn.appendChild(btnLabel)
+    if (activeCount > 0) {
+      const badge = document.createElement('span')
+      badge.className = 'amd-filter-badge'
+      badge.textContent = String(activeCount)
+      btn.appendChild(badge)
+    }
+    const arrow = document.createElement('span')
+    arrow.className = 'amd-filter-arrow'
+    arrow.textContent = '▾'
+    btn.appendChild(arrow)
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const isOpen = dropdown.classList.toggle('open')
+      if (isOpen) {
+        ddSearch.value = ''
+        renderDdTypes()
+      }
+    })
+    bar!.appendChild(btn)
+    bar!.appendChild(dropdown)
+
+    // Active type chips (removable, inline)
+    if (state.selectedTypes.size > 0) {
+      const chipWrap = document.createElement('div')
+      chipWrap.className = 'amd-active-chips'
+      for (const type of state.selectedTypes) {
+        const facet = facets.find((f) => f.type === type)
+        if (!facet) continue
+        const chip = document.createElement('button')
+        chip.type = 'button'
+        chip.className = 'amd-active-chip'
+        chip.title = `Rimuovi filtro: ${facet.displayName}`
+        const chipName = document.createElement('span')
+        chipName.textContent = facet.displayName
+        const chipX = document.createElement('span')
+        chipX.className = 'amd-chip-x'
+        chipX.textContent = '×'
+        chip.append(chipName, chipX)
+        chip.addEventListener('click', () => {
+          state.selectedTypes.delete(type)
+          commit()
+        })
+        chipWrap.appendChild(chip)
+      }
+      // Pause filter chip
+      if (state.pauseFilter !== 'all') {
+        const pauseChip = document.createElement('button')
+        pauseChip.type = 'button'
+        pauseChip.className = 'amd-active-chip'
+        const pauseName = document.createElement('span')
+        pauseName.textContent = state.pauseFilter === 'paused' ? 'Solo in pausa' : 'Solo attivi'
+        const pauseX = document.createElement('span')
+        pauseX.className = 'amd-chip-x'
+        pauseX.textContent = '×'
+        pauseChip.append(pauseName, pauseX)
+        pauseChip.addEventListener('click', () => {
+          state.pauseFilter = 'all'
+          commit()
+        })
+        chipWrap.appendChild(pauseChip)
+      }
+      bar!.appendChild(chipWrap)
+    }
+
+    // Counter
+    const counter = document.createElement('span')
+    counter.id = 'amd-visible-count'
+    counter.className = 'amd-visible-count'
+    bar!.appendChild(counter)
+
+    // Clear button (only when filters active)
+    if (activeCount > 0) {
+      const clear = document.createElement('button')
+      clear.type = 'button'
+      clear.className = 'amd-clear'
+      clear.textContent = 'Azzera'
+      clear.addEventListener('click', () => {
+        state = emptyState()
+        dropdown.classList.remove('open')
+        commit()
+      })
+      bar!.appendChild(clear)
+    }
+
+    // Variables-page extras
+    if (currentPage === 'VARIABLES' && hasBuiltInVariables()) {
+      const toggle = document.createElement('button')
+      toggle.type = 'button'
+      toggle.className = 'amd-builtin-toggle'
+      const refreshLabel = () => {
+        toggle.textContent = builtInVarsCollapsed ? 'Mostra variabili integrate' : 'Nascondi variabili integrate'
+      }
+      refreshLabel()
+      setBuiltInVariablesCollapsed(builtInVarsCollapsed)
+      toggle.addEventListener('click', () => {
+        builtInVarsCollapsed = !builtInVarsCollapsed
+        setBuiltInVariablesCollapsed(builtInVarsCollapsed)
+        refreshLabel()
+      })
+      bar!.appendChild(toggle)
+    }
+    if (currentPage === 'VARIABLES') {
+      const editBtn = document.createElement('button')
+      editBtn.type = 'button'
+      editBtn.className = 'amd-builtin-toggle'
+      editBtn.textContent = 'Etichette tipi…'
+      editBtn.addEventListener('click', () => openLabelEditor())
+      bar!.appendChild(editBtn)
+    }
+
+    updateVisibleCount(getRowElements(currentPage as Exclude<PageType, ''>))
+  }
+
+  renderBar()
+
+  // Close dropdown on outside click
+  if (!window.__amdDropdownBound) {
+    window.__amdDropdownBound = true
+    document.addEventListener('click', (e) => {
+      const open = document.querySelector(`#${TOOLBAR_ID} .amd-dropdown.open`) as HTMLElement | null
+      if (open && !open.closest(`#${TOOLBAR_ID}`)?.contains(e.target as Node)) {
+        open.classList.remove('open')
+      }
+    }, true)
+  }
+
+  // Keep counter in sync with GTM's native search
   const nativeSearch = findNativeSearch()
   if (nativeSearch && !nativeSearch.dataset.amdBound) {
     nativeSearch.dataset.amdBound = '1'
@@ -597,64 +857,16 @@ function renderToolbar(rows: GtmRow[]) {
     })
   }
 
-  // Built-in variables collapse toggle (VARIABLES page only).
-  if (currentPage === 'VARIABLES' && hasBuiltInVariables()) {
-    const toggle = document.createElement('button')
-    toggle.type = 'button'
-    toggle.className = 'amd-builtin-toggle'
-    const refreshLabel = () => {
-      toggle.textContent = builtInVarsCollapsed
-        ? 'Mostra variabili integrate'
-        : 'Nascondi variabili integrate'
-    }
-    refreshLabel()
-    setBuiltInVariablesCollapsed(builtInVarsCollapsed) // apply current state
-    toggle.addEventListener('click', () => {
-      builtInVarsCollapsed = !builtInVarsCollapsed
-      setBuiltInVariablesCollapsed(builtInVarsCollapsed)
-      refreshLabel()
-    })
-    bar.appendChild(toggle)
-  }
-
-  // Variable type-label editor (VARIABLES page only) — lives next to the filters,
-  // inside GTM, as requested. Lets the user name the type codes (e.g. cvt_…).
-  if (currentPage === 'VARIABLES') {
-    const editBtn = document.createElement('button')
-    editBtn.type = 'button'
-    editBtn.className = 'amd-builtin-toggle'
-    editBtn.textContent = 'Etichette tipi…'
-    editBtn.addEventListener('click', () => openLabelEditor())
-    bar.appendChild(editBtn)
-  }
-
-  // Keyboard shortcut: '/' focuses GTM's native name-search (like GitHub),
-  // unless the user is already typing in a field. Capture phase so we win over
-  // GTM's own key handlers. e.key is '/' regardless of which physical keys
-  // produce it (Shift+7 on IT layouts still yields '/').
+  // '/' shortcut focuses GTM's native search
   if (!window.__amdSlashBound) {
     window.__amdSlashBound = true
-    document.addEventListener(
-      'keydown',
-      (e) => {
-        if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
-        const t = e.target as HTMLElement | null
-        const typing =
-          t &&
-          (t.tagName === 'INPUT' ||
-            t.tagName === 'TEXTAREA' ||
-            t.isContentEditable ||
-            !!t.closest('input, textarea, [contenteditable]'))
-        if (typing) return
-        const search = findNativeSearch()
-        if (search) {
-          e.preventDefault()
-          e.stopPropagation()
-          search.focus()
-        }
-      },
-      true,
-    )
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable || !!t.closest('input, textarea, [contenteditable]'))) return
+      const search = findNativeSearch()
+      if (search) { e.preventDefault(); e.stopPropagation(); search.focus() }
+    }, true)
   }
 }
 
@@ -744,48 +956,81 @@ function initBulkSelection() {
   window.__amdBulkBound = true
 
   let lastRow: HTMLElement | null = null
+  let lastCheckedState: boolean | null = null
+
+  // gtm-table-row-checkbox is an Angular custom element (tag name, not attribute).
+  // The visual state lives on the <i> inside it via aria-checked.
+  const CHECKBOX_SEL = 'gtm-table-row-checkbox'
+  const ICON_SEL     = 'gtm-table-row-checkbox i'
+  const ROW_SEL      = '[gtm-table-row]'
+
+  function rowChecked(row: HTMLElement): boolean {
+    const icon = row.querySelector<HTMLElement>(ICON_SEL)
+    if (icon) return icon.getAttribute('aria-checked') === 'true'
+    const input = row.querySelector<HTMLInputElement>(`${CHECKBOX_SEL} input[type="checkbox"]`)
+    if (input) return input.checked
+    return false
+  }
+
+  function clickCheckbox(row: HTMLElement) {
+    // Prefer clicking the <i> (visual checkbox icon) — same target as Stape.
+    const icon = row.querySelector<HTMLElement>(ICON_SEL)
+    if (icon) { icon.click(); return }
+    const cb = row.querySelector<HTMLElement>(CHECKBOX_SEL)
+    if (cb) cb.click()
+  }
 
   document.addEventListener(
     'click',
-    (e: MouseEvent) => {
-      const checkboxArea = (e.target as HTMLElement).closest<HTMLElement>('[gtm-table-row-checkbox]')
-      if (!checkboxArea) return
-      const row = checkboxArea.closest<HTMLElement>('[gtm-table-row]')
+    (e: MouseEvent & { __amdBulk?: boolean }) => {
+      if (e.__amdBulk) return // our own synthetic click — skip
+      const target = e.target as HTMLElement
+
+      // Only trigger on clicks that land inside the checkbox component
+      const checkboxEl = target.closest<HTMLElement>(CHECKBOX_SEL)
+      if (!checkboxEl) return
+      const row = checkboxEl.closest<HTMLElement>(ROW_SEL)
       if (!row) return
       const table = row.closest<HTMLElement>('table')
       if (!table) return
 
       if (!e.shiftKey || !lastRow || lastRow.closest('table') !== table) {
+        // Normal click: record this row and its POST-click checked state (rAF so
+        // Angular has time to update aria-checked before we read it).
+        requestAnimationFrame(() => {
+          lastCheckedState = rowChecked(row)
+        })
         lastRow = row
         return
       }
 
-      e.preventDefault() // prevent text selection on shift+click
+      // Shift+click: select range
+      e.preventDefault()
+      e.stopPropagation()
 
-      const allRows = Array.from(table.querySelectorAll<HTMLElement>('[gtm-table-row]'))
+      const allRows = Array.from(table.querySelectorAll<HTMLElement>(ROW_SEL))
       const currentIdx = allRows.indexOf(row)
-      const lastIdx = allRows.indexOf(lastRow)
+      const lastIdx    = allRows.indexOf(lastRow)
       if (currentIdx < 0 || lastIdx < 0) return
+
+      // Target state: same as the last-clicked row after its toggle
+      const target_ = lastCheckedState ?? true
 
       const start = Math.min(lastIdx, currentIdx)
       const end   = Math.max(lastIdx, currentIdx)
 
-      const cb = checkboxArea.querySelector<HTMLInputElement>('input[type="checkbox"]')
-      const targetChecked = cb ? !cb.checked : true
-
-      for (let i = start; i <= end; i++) {
-        if (allRows[i] === row) continue // let the natural click handle the clicked row
-        const area = allRows[i].querySelector<HTMLElement>('[gtm-table-row-checkbox]')
-        if (!area) continue
-        const input = area.querySelector<HTMLInputElement>('input[type="checkbox"]')
-        const isChecked =
-          input ? input.checked
-          : area.getAttribute('aria-checked') === 'true' ||
-            area.classList.contains('mat-checkbox-checked')
-        if (isChecked !== targetChecked) area.click()
+      // Batch in rAF chunks to stay responsive on large lists
+      const batch = (from: number) => {
+        const to = Math.min(from + 25, end)
+        for (let i = from; i <= to; i++) {
+          if (rowChecked(allRows[i]) !== target_) clickCheckbox(allRows[i])
+        }
+        if (to < end) requestAnimationFrame(() => batch(to + 1))
       }
+      batch(start)
 
       lastRow = row
+      lastCheckedState = target_
     },
     true,
   )
@@ -845,6 +1090,7 @@ declare global {
     QOL?: Record<string, unknown>
     __amdSlashBound?: boolean
     __amdBulkBound?: boolean
+    __amdDropdownBound?: boolean
   }
 }
 window.QOL ??= {}

@@ -148,32 +148,64 @@ function evRows(): HTMLElement[] { return allMatches(ROW_SELECTORS) }
  *   3. Walk the snapshots; the first ancestor whose scrollTop changed is the
  *      real scroll container. Nudge it up by stickyH to clear our sticky toolbar.
  */
-function scrollToRow(target: HTMLElement) {
-  const root    = document.getElementById(ROOT_ID)
-  const stickyH = (root?.offsetHeight ?? 46)
-                + (document.getElementById(PINNED_ID)?.offsetHeight ?? 0)
-                + 8
-
-  // Snapshot every ancestor's scrollTop before the scroll.
-  type Snap = { el: HTMLElement; before: number }
-  const snaps: Snap[] = []
-  let cur: HTMLElement | null = target.parentElement
-  while (cur) {
-    snaps.push({ el: cur, before: cur.scrollTop })
-    cur = cur.parentElement as HTMLElement | null
+/** Find the real scroll container by probing: try setting scrollTop ±1 on each
+ *  ancestor — if it actually changes, that element can scroll. */
+function eventScrollContainer(target: HTMLElement): HTMLElement {
+  let p: HTMLElement | null = target.parentElement
+  while (p && p !== document.body) {
+    const prev = p.scrollTop
+    // Try scrolling down 1px
+    p.scrollTop = prev + 1
+    if (p.scrollTop !== prev) { p.scrollTop = prev; return p }
+    // Try scrolling up 1px (in case already at max)
+    p.scrollTop = Math.max(0, prev - 1)
+    if (p.scrollTop !== prev) { p.scrollTop = prev; return p }
+    p = p.parentElement
   }
+  return scrollAncestor(target)
+}
 
-  // Browser handles scroll container resolution — correct for auto/scroll/overlay.
-  target.scrollIntoView({ block: 'start', behavior: 'instant' })
+function scrollToRow(target: HTMLElement) {
+  const root   = document.getElementById(ROOT_ID)
+  const pinned = document.getElementById(PINNED_ID)
+  const isSGTM = new URLSearchParams(location.search).has('gtm_auth')
 
-  // Find the element the browser actually scrolled; nudge it for sticky headers.
-  for (const { el, before } of snaps) {
-    if (el.scrollTop !== before) {
-      el.scrollTop -= stickyH
-      return
+  if (isSGTM) {
+    // sGTM: ROOT/PINNED are outside the event-list scroll container.
+    // Use getBoundingClientRect delta so we scroll to the right position
+    // regardless of whether the target is currently visible or not.
+    const scrollEl  = eventScrollContainer(target)
+    const stickyH   = (root   && scrollEl.contains(root)   ? root.offsetHeight   : 0)
+                    + (pinned && scrollEl.contains(pinned) ? pinned.offsetHeight : 0)
+                    + 8
+    const delta = target.getBoundingClientRect().top
+                - scrollEl.getBoundingClientRect().top
+                - stickyH
+    scrollEl.scrollTop += delta
+  } else {
+    // Client-side TA: ROOT/PINNED are sticky INSIDE the scroll container.
+    // Original scrollIntoView + snapshot approach — proven to work here.
+    const stickyH = (root?.offsetHeight ?? 46)
+                  + (pinned?.offsetHeight ?? 0)
+                  + 8
+
+    type Snap = { el: HTMLElement; before: number }
+    const snaps: Snap[] = []
+    let cur: HTMLElement | null = target.parentElement
+    while (cur) {
+      snaps.push({ el: cur, before: cur.scrollTop })
+      cur = cur.parentElement as HTMLElement | null
+    }
+
+    target.scrollIntoView({ block: 'start', behavior: 'instant' })
+
+    for (const { el, before } of snaps) {
+      if (el.scrollTop !== before) {
+        el.scrollTop -= stickyH
+        return
+      }
     }
   }
-  // If already visible (nothing scrolled), the flash animation still runs — fine.
 }
 
 function pinSvg() {
@@ -452,6 +484,17 @@ function injectToolbar() {
     }
     root.style.position = 'relative'
     root.style.zIndex   = 'auto'  // let sGTM's tag-detail overlays appear on top
+
+    // In sGTM, the right-side tag-detail panel uses a low z-index and gets buried
+    // under our sticky sections (PINNED, VAR_ROOT). Override to a safe low value.
+    const sgtmZFix = document.createElement('style')
+    sgtmZFix.id = 'amd-sgtm-zfix'
+    sgtmZFix.textContent = `
+      #${ROOT_ID}    { z-index: 2 !important; }
+      #${PINNED_ID}  { z-index: 2 !important; }
+      #${VAR_ROOT_ID}{ z-index: 2 !important; }
+    `
+    document.head.appendChild(sgtmZFix)
   } else {
     scrollAncestor(list).prepend(root)
   }
