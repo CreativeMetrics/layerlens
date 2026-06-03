@@ -13,6 +13,7 @@ import {
   copyRowToNew,
   getRowElements,
   hasBuiltInVariables,
+  renameElement,
   setBuiltInVariablesCollapsed,
   toggleTagPause,
   type GtmRow,
@@ -47,6 +48,8 @@ const IMG_BASE =
 let state: FilterState = emptyState()
 let currentPage: PageType = ''
 let builtInVarsCollapsed = true // default: hidden, like the original
+let renameMode = false
+let copiedTableRows: unknown[] = []
 
 // Remember the type selection per page-type for the session, so leaving and
 // coming back to a list keeps your filter. sessionStorage = convenience, not a
@@ -330,6 +333,57 @@ function injectStyleOnce() {
     .amd-modal-save:hover { filter: brightness(.96); }
     .amd-modal-msg { color: #137333; font-size: 13px; }`
   document.head.appendChild(rowStyle)
+
+  const extraStyle = document.createElement('style')
+  extraStyle.id = 'amd-extra-style'
+  extraStyle.textContent = `
+    /* ── Bulk rename inputs ─────────────────────── */
+    .amd-rename-input {
+      display: block; width: calc(100% - 8px); margin: 1px 0;
+      padding: 3px 7px; border: 1px solid #e5c614; border-radius: 5px;
+      font: inherit; outline: none; box-sizing: border-box;
+    }
+    .amd-rename-input:focus { border-color: #c9ad07; box-shadow: 0 0 0 2px rgba(229,198,20,.25); }
+    #${TOOLBAR_ID} .amd-rename-active {
+      background: #e5c614; border-color: #c9ad07; color: #2c2c2a; font-weight: 600;
+    }
+    /* ── Lookup/RegEx table copy-paste ──────────── */
+    #amd-table-actions { display: flex; gap: 8px; padding: 6px 0 10px; }
+    #amd-table-actions button {
+      padding: 5px 12px; border: 1px solid rgba(0,0,0,.14); border-radius: 8px;
+      background: #fff; color: #3c4043; font-size: 13px; cursor: pointer;
+      transition: background .12s, border-color .12s;
+    }
+    #amd-table-actions button:hover { background: #faf6da; border-color: #e5c614; }
+    /* ── Toast ──────────────────────────────────── */
+    .amd-toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: #2c2c2a; color: #fff; padding: 8px 20px; border-radius: 8px;
+      font: 13px/1.4 system-ui, sans-serif; z-index: 99999; pointer-events: none;
+    }
+    /* ── Paste confirm modal ────────────────────── */
+    .amd-table-modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.38); z-index: 99998;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .amd-table-modal {
+      background: #fff; border-radius: 12px; padding: 24px; max-width: 380px; width: 90%;
+      box-shadow: 0 20px 60px rgba(0,0,0,.22);
+      font: 14px/1.5 system-ui, Roboto, Arial, sans-serif;
+    }
+    .amd-table-modal h3 { margin: 0 0 8px; font-size: 16px; color: #202124; }
+    .amd-table-modal p  { margin: 0 0 20px; color: #5f6368; font-size: 13px; }
+    .amd-table-modal-btns { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+    .amd-table-modal-btns button {
+      padding: 7px 16px; border-radius: 8px; cursor: pointer;
+      font: 13px/1 inherit; border: 1px solid transparent;
+    }
+    .amd-btn-cancel  { background: #f1f3f4; border-color: #dadce0 !important; color: #3c4043; }
+    .amd-btn-append  { background: #fff; border-color: #dadce0 !important; color: #1967d2; font-weight: 500; }
+    .amd-btn-replace { background: #e5c614; border-color: #e5c614 !important; color: #2c2c2a; font-weight: 600; }
+    .amd-table-modal-btns button:hover { filter: brightness(.95); }
+  `
+  document.head.appendChild(extraStyle)
 }
 
 /** The proven insertion point (from the original, working extension): the
@@ -804,6 +858,27 @@ function renderToolbar(rows: GtmRow[]) {
       bar!.appendChild(clear)
     }
 
+    // Rename button (all page types)
+    const renameBtn = document.createElement('button')
+    renameBtn.type = 'button'
+    renameBtn.id = 'amd-rename-btn'
+    renameBtn.className = 'amd-builtin-toggle' + (renameMode ? ' amd-rename-active' : '')
+    renameBtn.textContent = renameMode ? 'Salva nomi' : 'Rinomina…'
+    renameBtn.addEventListener('click', () => {
+      if (renameMode) confirmRenames()
+      else enterRenameMode()
+    })
+    bar!.appendChild(renameBtn)
+    if (renameMode) {
+      const cancelBtn = document.createElement('button')
+      cancelBtn.type = 'button'
+      cancelBtn.id = 'amd-rename-cancel'
+      cancelBtn.className = 'amd-builtin-toggle'
+      cancelBtn.textContent = 'Annulla'
+      cancelBtn.addEventListener('click', () => exitRenameMode())
+      bar!.appendChild(cancelBtn)
+    }
+
     // Variables-page extras
     if (currentPage === 'VARIABLES' && hasBuiltInVariables()) {
       const toggle = document.createElement('button')
@@ -1047,6 +1122,7 @@ function sync(rebuild = false) {
   if (page !== currentPage) {
     currentPage = page
     state = emptyState() // reset when moving between tags/triggers/variables
+    renameMode = false   // cancel any in-progress rename when navigating
     rebuild = true
   }
   const rows = getRowElements(page)
@@ -1063,6 +1139,400 @@ function sync(rebuild = false) {
   addCopyIcons(rows)
   addPauseIcons(rows)
   initBulkSelection()
+  injectTableCopyPasteButtons()
+}
+
+// ── Bulk Rename ───────────────────────────────────────────────────────────────
+
+function enterRenameMode() {
+  if (currentPage === '') return
+  renameMode = true
+  renderToolbar(getRowElements(currentPage as Exclude<PageType, ''>))
+
+  for (const rowEl of document.querySelectorAll<HTMLElement>('[gtm-table-row]')) {
+    if (rowEl.querySelector('.amd-rename-input')) continue
+    const cell = rowEl.querySelector('td:nth-child(2)')
+    if (!cell) continue
+    const link = cell.querySelector('a')
+    if (!link) continue
+
+    const clone = link.cloneNode(true) as HTMLElement
+    clone.querySelectorAll('.amd-type-icon, .amd-type-initial').forEach((el) => el.remove())
+    const origName = (clone.textContent ?? '').trim()
+
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.className = 'amd-rename-input'
+    input.value = origName
+    input.dataset.amdOrig = origName
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); confirmRenames() }
+      if (e.key === 'Escape') exitRenameMode()
+    })
+    link.style.display = 'none'
+    link.insertAdjacentElement('afterend', input)
+  }
+}
+
+function exitRenameMode() {
+  renameMode = false
+  for (const input of document.querySelectorAll<HTMLInputElement>('.amd-rename-input')) {
+    const link = input.previousElementSibling as HTMLElement | null
+    if (link?.tagName === 'A') link.style.display = ''
+    input.remove()
+  }
+  renderToolbar(getRowElements(currentPage as Exclude<PageType, ''>))
+}
+
+function confirmRenames() {
+  if (currentPage === '') return
+  const page = currentPage as Exclude<PageType, ''>
+
+  const changes = Array.from(document.querySelectorAll<HTMLInputElement>('.amd-rename-input'))
+    .map((input) => ({
+      input,
+      rowEl: input.closest<HTMLElement>('[gtm-table-row]'),
+      newName: input.value.trim(),
+      origName: input.dataset.amdOrig ?? '',
+    }))
+    .filter(({ rowEl, newName, origName }) => !!rowEl && !!newName && newName !== origName)
+
+  if (changes.length === 0) { exitRenameMode(); return }
+
+  const btn = document.getElementById('amd-rename-btn') as HTMLButtonElement | null
+  if (btn) { btn.textContent = `Rinominando 0/${changes.length}…`; btn.disabled = true }
+  const cancelBtn = document.getElementById('amd-rename-cancel') as HTMLButtonElement | null
+  if (cancelBtn) cancelBtn.disabled = true
+
+  let done = 0
+  let failed = 0
+
+  const onResult = (ok: boolean) => {
+    if (ok) done++; else failed++
+    const total = done + failed
+    if (btn) btn.textContent = `Rinominando ${total}/${changes.length}…`
+    if (total < changes.length) return
+    if (failed > 0) {
+      if (btn) {
+        btn.textContent = `${failed} error${failed > 1 ? 'i' : 'e'} su ${changes.length}`
+        btn.disabled = false
+        btn.style.color = '#c5221f'
+      }
+      setTimeout(() => exitRenameMode(), 2500)
+    } else {
+      exitRenameMode()
+    }
+  }
+
+  changes.forEach(({ rowEl, newName }, idx) => {
+    setTimeout(() => {
+      if (rowEl) renameElement(page, rowEl, newName, onResult)
+      else onResult(false)
+    }, idx * 1200)
+  })
+}
+
+// ── Lookup / RegEx Table copy-paste ──────────────────────────────────────────
+
+type TableListItem = { mapValue: Array<{ string: string }> }
+
+function getTableAddRowBtn(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-ng-click="ctrl.addRow()"]')
+}
+
+/** Walks ctrl.instance.paramMap.map.value.listItem and returns the live array
+ *  if found. maxDepth controls how many parent scopes to try. */
+function tryExtractTable(
+  scope: Record<string, unknown> | undefined,
+  maxDepth = 6,
+): TableListItem[] | null {
+  let s: Record<string, unknown> | undefined = scope
+  for (let i = 0; i < maxDepth && s; i++) {
+    try {
+      const ctrl = (s['ctrl'] ?? s['$ctrl']) as Record<string, unknown> | undefined
+      if (ctrl && typeof ctrl === 'object') {
+        const instance = ctrl['instance'] as Record<string, unknown> | undefined
+        const paramMap = instance?.['paramMap'] as Record<string, unknown> | undefined
+        const map = paramMap?.['map'] as Record<string, unknown> | undefined
+        const value = map?.['value'] as Record<string, unknown> | undefined
+        const listItem = value?.['listItem']
+        if (Array.isArray(listItem)) return listItem as TableListItem[]
+      }
+    } catch { /* ignore */ }
+    s = s['$parent'] as Record<string, unknown> | undefined
+  }
+  return null
+}
+
+/** After modifying listItem directly, trigger Angular's update cycle by clicking
+ *  the DOM add-row button (which runs inside Zone.js, properly scheduling a $digest).
+ *  addRow() appends one empty item — we pop it immediately so only our data remains. */
+/** Click the delete button of the last visible simple-table row. */
+function clickDeleteLastRow() {
+  const rows = document.querySelectorAll<HTMLElement>('.simple-table-row')
+  const lastRow = rows[rows.length - 1]
+  if (!lastRow) return
+  const btn =
+    lastRow.querySelector<HTMLElement>('[data-ng-click*="deleteRow"]') ??
+    lastRow.querySelector<HTMLElement>('button:last-child')
+  btn?.click()
+}
+
+/** Delete all existing rows by clicking their delete buttons. */
+function clickDeleteAllRows() {
+  let safety = 200
+  while (safety-- > 0) {
+    const rows = document.querySelectorAll<HTMLElement>('.simple-table-row')
+    if (rows.length === 0) break
+    const lastRow = rows[rows.length - 1]
+    const btn =
+      lastRow.querySelector<HTMLElement>('[data-ng-click*="deleteRow"]') ??
+      lastRow.querySelector<HTMLElement>('button:last-child')
+    if (!btn) break
+    btn.click()
+  }
+}
+
+/** Paste rows by clicking addRow for each entry, then reading the fresh listItem
+ *  reference and writing values on the newly added row — same pattern as Andromeda's
+ *  ctrl.addRow() + immediate set, but via DOM clicks to avoid the tableHelper issue. */
+function pasteRowsByClick(rowsData: Array<[string, string]>) {
+  const addRowBtn = getTableAddRowBtn()
+  if (!addRowBtn) return
+  for (const [key, val] of rowsData) {
+    addRowBtn.click()
+    const currentItems = getTableListItemArray()
+    if (!currentItems || currentItems.length === 0) break
+    const last = currentItems[currentItems.length - 1]
+    if (last?.mapValue?.[0] != null) last.mapValue[0].string = key
+    if (last?.mapValue?.[1] != null) last.mapValue[1].string = val
+  }
+  // Final addRow + deleteRow forces a digest that commits the last row's values
+  addRowBtn.click()
+  clickDeleteLastRow()
+}
+
+/** Candidate DOM elements whose Angular scope might carry the table ctrl.
+ *  Exported for diagnostic logging. */
+function tableScopeCandidates(): Element[] {
+  const btn = getTableAddRowBtn()
+  if (!btn) return []
+  return [
+    btn,
+    btn.parentElement,
+    btn.closest('.blg-form-input'),
+    btn.closest('.simple-table')?.parentElement ?? null,
+    btn.closest('[data-ng-controller]'),
+    document.querySelector('.gtm-veditor-section'),
+    document.querySelector('[data-ng-form]'),
+    document.querySelector('.blg-sheet-content'),
+  ].filter((el): el is Element => el != null)
+}
+
+function getTableListItemArray(): TableListItem[] | null {
+  if (!window.angular) return null
+
+  // Strategy 1: DOM scope() — works when Angular debug info is enabled
+  for (const el of tableScopeCandidates()) {
+    try {
+      const scope = window.angular.element(el).scope() as Record<string, unknown> | undefined
+      const found = tryExtractTable(scope)
+      if (found) return found
+    } catch { /* ignore */ }
+  }
+
+  // Strategy 2: $rootScope traversal — collects ALL listItem arrays, then picks
+  // the one whose length matches the visible DOM row count (disambiguates between
+  // the active editor and stale scopes from previously opened variables).
+  try {
+    const inj = window.angular.element(document.body).injector()
+    if (!inj) return null
+    const rootScope = inj.get<Record<string, unknown>>('$rootScope')
+    if (!rootScope) return null
+
+    const candidates: TableListItem[][] = []
+
+    function collect(scope: Record<string, unknown> | null | undefined, depth: number) {
+      if (!scope || depth > 80) return
+      const found = tryExtractTable(scope, 1)
+      if (found) candidates.push(found)
+      collect(scope['$$childHead'] as Record<string, unknown> | null | undefined, depth + 1)
+      collect(scope['$$nextSibling'] as Record<string, unknown> | null | undefined, depth)
+    }
+    collect(rootScope['$$childHead'] as Record<string, unknown> | null | undefined, 0)
+
+    if (candidates.length === 0) return null
+    if (candidates.length === 1) return candidates[0]
+
+    // Count rows currently rendered in the DOM by GTM's simple-table component.
+    const domRowCount = document.querySelectorAll('.simple-table-row').length
+    const exact = candidates.filter((items) => items.length === domRowCount)
+    if (exact.length === 1) return exact[0]
+
+    // Still ambiguous — prefer the last scope found in DFS (most recently opened editor).
+    return candidates[candidates.length - 1]
+  } catch {
+    return null
+  }
+}
+
+function injectTableCopyPasteButtons() {
+  const addRowBtn = getTableAddRowBtn()
+  if (!addRowBtn) {
+    document.getElementById('amd-table-actions')?.remove()
+    return
+  }
+  if (document.getElementById('amd-table-actions')) return
+
+  const actions = document.createElement('div')
+  actions.id = 'amd-table-actions'
+
+  const copyBtn = document.createElement('button')
+  copyBtn.type = 'button'
+  copyBtn.textContent = 'Copia tabella'
+  copyBtn.title = 'Copia tutte le righe (Ctrl+C)'
+  copyBtn.addEventListener('click', () => copyTable())
+
+  const pasteBtn = document.createElement('button')
+  pasteBtn.type = 'button'
+  pasteBtn.textContent = 'Incolla'
+  pasteBtn.title = 'Incolla righe (Ctrl+V)'
+  pasteBtn.addEventListener('click', () => {
+    navigator.clipboard.readText()
+      .then((text) => pasteTable(text))
+      .catch(() => pasteTable(''))
+  })
+
+  actions.append(copyBtn, pasteBtn)
+
+  // Insert just before the table section that contains the add-row button
+  const tableSection =
+    addRowBtn.closest<HTMLElement>('.blg-form-input') ??
+    addRowBtn.closest<HTMLElement>('[diff-field]') ??
+    addRowBtn.parentElement
+  if (tableSection) {
+    tableSection.insertAdjacentElement('beforebegin', actions)
+  } else {
+    addRowBtn.insertAdjacentElement('beforebegin', actions)
+  }
+
+  // Keyboard shortcuts — set up once per page-world session
+  if (!window.__amdTableKbBound) {
+    window.__amdTableKbBound = true
+    document.addEventListener('keydown', (e) => {
+      if (!getTableAddRowBtn()) return
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') { e.preventDefault(); copyTable() }
+      else if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        e.preventDefault()
+        navigator.clipboard.readText()
+          .then((text) => pasteTable(text))
+          .catch(() => pasteTable(''))
+      }
+    }, true)
+  }
+}
+
+function copyTable() {
+  const items = getTableListItemArray()
+  if (!items) { showToast('Tabella non trovata'); return }
+  copiedTableRows = JSON.parse(JSON.stringify(items)) as unknown[]
+  showToast(`${items.length} rig${items.length === 1 ? 'a' : 'he'} copiata`)
+}
+
+function pasteTable(clipboardText: string) {
+  const hasCopied = copiedTableRows.length > 0
+  const hasText = clipboardText.trim() !== ''
+  if (!hasCopied && !hasText) { showToast('Nessun dato da incollare'); return }
+  if (!getTableAddRowBtn()) { showToast('Editor tabella non trovato'); return }
+
+  // Use DOM row count (not items.length) to decide whether to show the modal —
+  // more reliable since it reflects what's actually visible.
+  const existingDomRows = document.querySelectorAll('.simple-table-row').length
+
+  const doInsert = (action: 'replace' | 'append') => {
+    if (action === 'replace') clickDeleteAllRows()
+
+    if (hasCopied) {
+      const fresh = JSON.parse(JSON.stringify(copiedTableRows)) as TableListItem[]
+      copiedTableRows = []
+      pasteRowsByClick(fresh.map((r) => [r.mapValue[0]?.string ?? '', r.mapValue[1]?.string ?? '']))
+      showToast(`${fresh.length} rig${fresh.length === 1 ? 'a' : 'he'} incollata`)
+    } else {
+      const rowsData: Array<[string, string]> = []
+      for (const line of clipboardText.split('\n')) {
+        const [rawKey, rawVal = ''] = line.split('\t')
+        const key = rawKey.trim()
+        if (key) rowsData.push([key, rawVal.trim()])
+      }
+      pasteRowsByClick(rowsData)
+      showToast(`${rowsData.length} rig${rowsData.length === 1 ? 'a' : 'he'} incollata`)
+    }
+  }
+
+  if (existingDomRows > 0) {
+    void showTablePasteModal().then((action) => {
+      if (action === 'cancel') { showToast('Operazione annullata'); return }
+      doInsert(action)
+    })
+  } else {
+    doInsert('append')
+  }
+}
+
+function showTablePasteModal(): Promise<'replace' | 'append' | 'cancel'> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div')
+    overlay.className = 'amd-table-modal-overlay'
+
+    const modal = document.createElement('div')
+    modal.className = 'amd-table-modal'
+
+    const title = document.createElement('h3')
+    title.textContent = 'Righe esistenti'
+
+    const body = document.createElement('p')
+    body.textContent = 'La tabella contiene già delle righe. Vuoi sostituirle o aggiungere le nuove in fondo?'
+
+    const btns = document.createElement('div')
+    btns.className = 'amd-table-modal-btns'
+
+    const cancelBtn = document.createElement('button')
+    cancelBtn.className = 'amd-btn-cancel'
+    cancelBtn.textContent = 'Annulla'
+
+    const appendBtn = document.createElement('button')
+    appendBtn.className = 'amd-btn-append'
+    appendBtn.textContent = 'Aggiungi in fondo'
+
+    const replaceBtn = document.createElement('button')
+    replaceBtn.className = 'amd-btn-replace'
+    replaceBtn.textContent = 'Sostituisci tutto'
+
+    btns.append(cancelBtn, appendBtn, replaceBtn)
+    modal.append(title, body, btns)
+    overlay.appendChild(modal)
+    document.body.appendChild(overlay)
+
+    const cleanup = (result: 'replace' | 'append' | 'cancel') => {
+      overlay.remove()
+      resolve(result)
+    }
+    cancelBtn.addEventListener('click', () => cleanup('cancel'))
+    appendBtn.addEventListener('click', () => cleanup('append'))
+    replaceBtn.addEventListener('click', () => cleanup('replace'))
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup('cancel') })
+  })
+}
+
+function showToast(msg: string) {
+  document.querySelector('.amd-toast')?.remove()
+  const toast = document.createElement('div')
+  toast.className = 'amd-toast'
+  toast.textContent = msg
+  document.body.appendChild(toast)
+  setTimeout(() => toast.remove(), 2500)
 }
 
 // Keep in sync with GTM's own re-renders (debounced). Ignore mutations that
@@ -1071,7 +1541,7 @@ let scheduled = false
 const observer = new MutationObserver((mutations) => {
   const ours = mutations.every((m) => {
     const t = m.target as HTMLElement
-    return t.closest?.(`#${TOOLBAR_ID}, #amd-label-editor, #andromeda-filters-style`)
+    return t.closest?.(`#${TOOLBAR_ID}, #amd-label-editor, #andromeda-filters-style, #amd-table-actions, .amd-table-modal-overlay, .amd-toast`)
   })
   if (ours || scheduled) return
   scheduled = true
@@ -1091,6 +1561,7 @@ declare global {
     __amdSlashBound?: boolean
     __amdBulkBound?: boolean
     __amdDropdownBound?: boolean
+    __amdTableKbBound?: boolean
   }
 }
 window.QOL ??= {}

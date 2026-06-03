@@ -669,6 +669,94 @@ function clickCopyItem(): boolean {
   }
 }
 
+// ── Rename helper ─────────────────────────────────────────────────────────────
+
+/** Rename a single entity (tag/trigger/variable/client) to `newName`.
+ *  Uses the same three key-resolution strategies as copyRowToNew.
+ *  Returns true if the operation was initiated; result comes via onResult. */
+export function renameElement(
+  page: Exclude<PageType, ''>,
+  rowEl: HTMLElement,
+  newName: string,
+  onResult?: (ok: boolean) => void,
+): boolean {
+  try {
+    const inj = injector()
+    if (!inj) { onResult?.(false); return false }
+
+    const svc = service(page) as {
+      get: (key: unknown) => Promise<{ data: GtmElementData }>
+      getList: (ctx: unknown) => { $$state?: { value?: GtmElementScope[] } }
+      update: (entity: unknown) => Promise<unknown>
+    } | null
+    if (!svc) { onResult?.(false); return false }
+
+    const singular = SCOPE_KEY[page]
+    let key: unknown
+
+    // Strategy 1: table scope via tableCtrl
+    try {
+      const table =
+        document.querySelector('.gtm-container-page-content [gtm-table]:last-of-type table') ??
+        document.querySelector('.gtm-container-page-content [gtm-table] table')
+      const tableScope = table
+        ? (window.angular?.element(table).scope() as {
+            tableCtrl?: {
+              getItems?: () => Array<{ key?: unknown }>
+              items?: Array<{ key?: unknown }>
+              internalItems?: Array<{ key?: unknown }>
+            }
+          } | undefined)
+        : undefined
+      const ctrl = tableScope?.tableCtrl
+      const items = ctrl?.getItems?.() ?? ctrl?.items ?? ctrl?.internalItems
+      if (items) {
+        const allRows = table ? Array.from(table.querySelectorAll('[gtm-table-row]')) : []
+        const idx = allRows.indexOf(rowEl)
+        if (idx >= 0 && items[idx]) key = items[idx].key
+      }
+    } catch { /* ignore */ }
+
+    // Strategy 2: $rootScope traversal
+    if (!key) key = findKeyViaRootScope(page, rowName(rowEl))
+
+    // Strategy 3: getList name match
+    if (!key) {
+      const name = rowName(rowEl)
+      const list = svc.getList(appContext())?.$$state?.value ?? []
+      const match = name
+        ? list.find((e) => {
+            const entry = ((e as unknown as GtmRowScope)[singular] ?? e) as { data?: GtmElementData }
+            return entry.data?.name === name
+          })
+        : undefined
+      if (match) {
+        const entry = ((match as unknown as GtmRowScope)[singular] ?? match) as { key?: unknown }
+        key = entry.key
+      }
+    }
+
+    if (!key) { onResult?.(false); return false }
+
+    void svc.get(key)
+      .then((fetched) => {
+        fetched.data.name = newName
+        return svc.update(fetched)
+      })
+      .then(() => onResult?.(true))
+      .catch((err) => {
+        console.warn('[LayerLens] rename: service error', err)
+        onResult?.(false)
+      })
+
+    return true
+  } catch (err) {
+    console.warn('[LayerLens] rename error', err)
+    onResult?.(false)
+    return false
+  }
+}
+
 // ── Pause/resume helpers ──────────────────────────────────────────────────────
 
 /** Toggle the paused state of a tag row using the Angular tagService directly.

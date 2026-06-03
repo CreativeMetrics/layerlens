@@ -19,6 +19,7 @@ export type RuntimeMessage =
   | { code: 'get_inject_status' }
   | { code: 'exit_preview' }
   | { code: 'check_update'; data: null }
+  | { code: 'GTM_IDENTIFIER'; data: { containerId: string } }
   | { action: 'block_page_change'; value: boolean; data?: unknown }
   | { action: 'qol_changes'; value: boolean; data?: unknown; version?: string }
   | { action: 'blocked_gtm_status'; gtmID: string; timeout: boolean }
@@ -47,3 +48,4 @@ export type PageMessage =
       type: keyof FiltersConfiguration
       filters_configuration: FiltersConfiguration
     }
+  | { code: 'GTM_IDENTIFIER'; data: { containerId: string } }

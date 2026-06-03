@@ -13,6 +13,7 @@ import type { StorageSchema } from '@/lib/storage'
 let blockedGtm = ''
 let injectIn: { regExp: string; gtmId: string; disableGTM: boolean } | undefined
 let gtmSites: StorageSchema['gtm_sites'] = []
+const gtmIdentifierByTab = new Map<number, string>()
 
 chrome.runtime.onInstalled.addListener(async () => {
   chrome.action.setBadgeBackgroundColor({ color: '#e5c614' })
@@ -141,12 +142,41 @@ function pushStatus(tabId: number): void {
   void chrome.tabs
     .sendMessage(tabId, { action: 'inject_gtm_status', injectIn: JSON.stringify(injectIn) })
     .catch(() => {})
+  const containerId = gtmIdentifierByTab.get(tabId)
+  if (containerId) {
+    void chrome.tabs
+      .sendMessage(tabId, { code: 'GTM_IDENTIFIER', data: { containerId } })
+      .catch(() => {})
+  }
 }
 
 chrome.tabs.onActivated.addListener(({ tabId }) => pushStatus(tabId))
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (tab.active && (info.status === 'loading' || info.status === 'complete')) pushStatus(tabId)
 })
+chrome.tabs.onRemoved.addListener((tabId) => gtmIdentifierByTab.delete(tabId))
+
+// ── x-gtm-identifier — sGTM container badge ───────────────────────────────────
+// sGTM servers return this response header on every request. Capturing it here
+// (service-worker context, bypasses CORS) lets us show the container ID as a
+// badge in the Tag Assistant debug view without any page-world hacks.
+
+chrome.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    if (details.tabId < 0) return
+    const header = details.responseHeaders?.find(
+      (h) => h.name.toLowerCase() === 'x-gtm-identifier',
+    )
+    if (!header?.value) return
+    const { tabId, value: containerId } = { tabId: details.tabId, value: header.value }
+    gtmIdentifierByTab.set(tabId, containerId)
+    void chrome.tabs
+      .sendMessage(tabId, { code: 'GTM_IDENTIFIER', data: { containerId } })
+      .catch(() => {})
+  },
+  { urls: ['<all_urls>'] },
+  ['responseHeaders'],
+)
 
 // ── Shopify Pixel Sandbox bridge — background side ────────────────────────────
 // Mirrors Stape GTM Helper's "Shopify Sandbox dataLayer" feature.

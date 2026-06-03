@@ -27,6 +27,19 @@ const pinnedItems = new Map<string, string>()
 let filterText    = ''
 let varFilterText = ''
 
+// On sGTM preview pages the container ID is in ?id=GTM-XXXXX — read it
+// immediately so the badge appears as soon as the toolbar is injected,
+// without waiting for a webRequest header that may never arrive.
+const _urlId = new URLSearchParams(location.search).get('id') ?? ''
+let gtmContainerId = _urlId.startsWith('GTM-') ? _urlId : ''
+
+// Variable-display preference passed by the content script via dataset.
+// 'default' = leave GTM's radio as-is; 'names'/'values' = auto-apply.
+let varDisplayMode: 'default' | 'names' | 'values' = (() => {
+  const v = document.documentElement.dataset.amdVarDisplay
+  return (v === 'names' || v === 'values') ? v : 'default'
+})()
+
 // ── Selectors ────────────────────────────────────────────────────────────────
 
 const LIST_SELECTORS = [
@@ -434,6 +447,36 @@ function injectStyles() {
     .amd-consent-badge.amd-c-no::before  { background: #c5221f; }
     .amd-consent-badge.amd-c-unk { background: #f1f3f4; color: #5f6368; }
     .amd-consent-badge.amd-c-unk::before { background: #9aa0a6; }
+
+    /* ── Variable display select ── */
+    .amd-ta-var-label {
+      font: 11px/1 system-ui, sans-serif;
+      color: #7a6f1a; flex-shrink: 0; white-space: nowrap;
+    }
+    #amd-ta-var-display {
+      font: 12px/1 system-ui, sans-serif;
+      border: 1px solid rgba(229,198,20,.5); border-radius: 6px;
+      padding: 3px 5px; background: rgba(255,255,255,.85);
+      color: #3c4043; cursor: pointer; flex-shrink: 0; outline: none;
+      max-width: 80px; width: 80px;
+    }
+    #amd-ta-var-display:hover { border-color: rgba(229,198,20,.9); }
+
+    /* ── sGTM Container ID badge ── */
+    #amd-ta-container-id {
+      display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+      padding: 3px 9px; border-radius: 5px;
+      background: #e8f0fe; color: #1967d2;
+      border: 1px solid #c5d8fc;
+      font: 600 11px/1 monospace;
+      cursor: pointer; white-space: nowrap; user-select: none;
+      transition: background .12s;
+    }
+    #amd-ta-container-id:hover { background: #d2e3fc; }
+    #amd-ta-container-id .amd-cid-label {
+      font: 500 10px/1 system-ui, sans-serif;
+      color: #5f6368; letter-spacing: .04em; text-transform: uppercase;
+    }
   `
   document.head.appendChild(s)
 }
@@ -504,6 +547,35 @@ function injectToolbar() {
       filterText = (e.target as HTMLInputElement).value.toLowerCase().trim()
       applyFilter(evRows())
     })
+
+  // Variable display selector
+  const varLabel = document.createElement('span')
+  varLabel.className = 'amd-ta-var-label'
+  varLabel.textContent = 'Variabili:'
+
+  const varSel = document.createElement('select')
+  varSel.id = 'amd-ta-var-display'
+  varSel.title = 'Modalità visualizzazione variabili nei dettagli tag'
+  for (const [val, label] of [['default', 'Default'], ['names', 'Nomi'], ['values', 'Valori']] as const) {
+    const opt = document.createElement('option')
+    opt.value = val
+    opt.textContent = label
+    varSel.appendChild(opt)
+  }
+  varSel.value = varDisplayMode
+  varSel.addEventListener('change', () => {
+    const v = varSel.value as 'default' | 'names' | 'values'
+    varDisplayMode = v
+    // Clear applied markers so applyVariableDisplay re-applies with the new mode
+    document.querySelectorAll<HTMLElement>('.tag-details__variable-mode[data-amd-var-set]')
+      .forEach(el => { delete el.dataset.amdVarSet })
+    window.postMessage({ action: 'amd_set_var_display', value: v }, '*')
+    if (v !== 'default') applyVariableDisplay()
+  })
+  root.appendChild(varLabel)
+  root.appendChild(varSel)
+
+  updateContainerBadge()
 }
 
 // ── Pinned section ────────────────────────────────────────────────────────────
@@ -1131,6 +1203,151 @@ function formatUrlCells() {
   }
 }
 
+// ── sGTM Container ID badge ───────────────────────────────────────────────────
+
+function updateContainerBadge() {
+  if (!gtmContainerId) return
+  const root = document.getElementById(ROOT_ID)
+  if (!root?.isConnected) return
+
+  let badge = document.getElementById('amd-ta-container-id') as HTMLButtonElement | null
+  if (!badge) {
+    badge = document.createElement('button')
+    badge.id = 'amd-ta-container-id'
+    badge.type = 'button'
+    badge.title = 'ID container sGTM — clicca per copiare'
+    root.appendChild(badge)
+  }
+
+  const label = document.createElement('span')
+  label.className = 'amd-cid-label'
+  label.textContent = 'sGTM'
+  badge.replaceChildren(label, document.createTextNode(' ' + gtmContainerId))
+
+  badge.onclick = () => {
+    navigator.clipboard.writeText(gtmContainerId).then(() => {
+      badge!.replaceChildren(label.cloneNode(true), document.createTextNode(' ✓ Copiato'))
+      setTimeout(() => updateContainerBadge(), 1500)
+    }).catch(() => {})
+  }
+}
+
+// Receive GTM_IDENTIFIER relayed from the content script (sGTM preview pages).
+window.addEventListener('message', (e: MessageEvent) => {
+  if (e.source !== window) return
+  const d = e.data as { code?: string; data?: { containerId?: string } } | null
+  if (!d || typeof d !== 'object') return
+  if (d.code === 'GTM_IDENTIFIER' && typeof d.data?.containerId === 'string') {
+    gtmContainerId = d.data.containerId
+    updateContainerBadge()
+  }
+})
+
+// On tagassistant.google.com the container ID is NOT in the page URL and there
+// are no direct requests to the sGTM server from this tab.  Instead, Tag
+// Assistant polls a get_memo endpoint whose JSON response contains
+// REQUEST_SUMMARY messages with the sGTM request headers — including
+// x-gtm-identifier.  We intercept that XHR to extract the ID.
+if (location.hostname === 'tagassistant.google.com') {
+  const _origOpen = XMLHttpRequest.prototype.open
+  const _origSend = XMLHttpRequest.prototype.send
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(XMLHttpRequest.prototype as any).open = function(
+    method: string, url: string | URL, ...rest: unknown[]
+  ) {
+    ;(this as any)._amdUrl = String(url)
+    return (_origOpen as (...a: unknown[]) => unknown).apply(this, [method, url, ...rest])
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(XMLHttpRequest.prototype as any).send = function(...args: unknown[]) {
+    const url: string = (this as any)._amdUrl ?? ''
+    if (url.includes('get_memo?id=')) {
+      this.addEventListener('load', function(this: XMLHttpRequest) {
+        try {
+          let text = this.responseText
+          // Strip Google's JSONP protection prefix `)]}'` + optional newline
+          if (text.startsWith(")]}'")) text = text.slice(4)
+          if (!text.trim()) return
+          const data = JSON.parse(text) as Record<string, unknown>
+          for (const key of Object.keys(data)) {
+            const messages = data[key]
+            if (!Array.isArray(messages)) continue
+            for (const msg of messages as Record<string, unknown>[]) {
+              if (msg['messageType'] === 'REQUEST_SUMMARY') {
+                const headers = (msg['request'] as Record<string, unknown> | null)?.['headers']
+                const id = (headers as Record<string, string> | null)?.['x-gtm-identifier']
+                if (typeof id === 'string' && id) {
+                  gtmContainerId = id
+                  updateContainerBadge()
+                  // Restore originals — no need to keep intercepting once we have the ID.
+                  XMLHttpRequest.prototype.open = _origOpen
+                  ;(XMLHttpRequest.prototype as any).send = _origSend
+                  return
+                }
+              }
+            }
+          }
+        } catch { /* ignore parse errors */ }
+      })
+    }
+    return (_origSend as (...a: unknown[]) => unknown).apply(this, args)
+  }
+}
+
+// ── Auto-expand "Show More" in tag detail sheets ──────────────────────────────
+
+/**
+ * When a tag detail sheet opens, GTM collapses extra properties behind a
+ * "Show More" toggle. This clicks it automatically on first appearance.
+ *
+ * The dataset flag prevents double-clicking before Angular processes the first
+ * click. It is cleared whenever the element shows "Show Less" (i.e. Angular
+ * recycled the node for a new detail sheet that starts collapsed).
+ */
+function autoExpandShowMore() {
+  const els = document.querySelectorAll<HTMLElement>('.tag-details__show-more')
+  for (const el of els) {
+    const text = el.textContent?.toLowerCase() ?? ''
+    const isShowMore = text.includes('show more') || text.includes('mostra di più')
+    if (!isShowMore) {
+      // "Show Less" / empty — reset flag so the next tag detail auto-expands
+      delete el.dataset.amdAutoExpanded
+      continue
+    }
+    if (el.dataset.amdAutoExpanded) continue
+    el.dataset.amdAutoExpanded = '1'
+    el.click()
+  }
+}
+
+// ── Auto-apply variable display mode in tag detail sheets ─────────────────────
+
+/**
+ * When varDisplayMode is 'names' or 'values', automatically sets the
+ * corresponding radio button in the tag detail variable-mode section.
+ * The dataset marker prevents re-dispatching on every sync() call.
+ * It is cleared when the user changes the select (so all open sheets update).
+ */
+function applyVariableDisplay() {
+  if (varDisplayMode === 'default') return
+  const modes = document.querySelectorAll<HTMLElement>('.tag-details__variable-mode')
+  for (const mode of modes) {
+    if (mode.dataset.amdVarSet === varDisplayMode) continue
+    const input = mode.querySelector<HTMLInputElement>(`form input[value="${varDisplayMode}"]`)
+    if (!input) continue
+    if (!input.checked) {
+      const otherVal = varDisplayMode === 'values' ? 'names' : 'values'
+      const other = mode.querySelector<HTMLInputElement>(`form input[value="${otherVal}"]`)
+      if (other) other.checked = false
+      input.checked = true
+      input.dispatchEvent(new Event('click', { bubbles: true }))
+    }
+    mode.dataset.amdVarSet = varDisplayMode
+  }
+}
+
 // ── Main sync ─────────────────────────────────────────────────────────────────
 
 
@@ -1149,6 +1366,10 @@ function sync() {
 
   // Variables tab panel (independent injection point)
   injectVarSearch()
+
+  // Tag detail enhancements
+  autoExpandShowMore()
+  applyVariableDisplay()
 
   // Tag type coloring + failed highlighting + JSON formatter + URL param formatter
   colorTagCards()

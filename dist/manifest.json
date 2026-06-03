@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LayerLens",
-  "version": "5.7.0",
+  "version": "5.8.0",
   "description": "Vedi dentro il tuo GTM: filtri e strumenti per Tag Manager + inspector del dataLayer.",
   "icons": {
     "16": "img/icon-16.png",
@@ -20,7 +20,8 @@
     "alarms",
     "cookies",
     "webNavigation",
-    "scripting"
+    "scripting",
+    "webRequest"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -34,7 +35,7 @@
       "js": [
         "assets/block-page-change.content.ts-loader-DkZaehDn.js",
         "assets/datalayer-checker.content.ts-wXkMdQKM.js",
-        "assets/qol-changes.content.ts-loader-CGY35C64.js"
+        "assets/qol-changes.content.ts-loader-NeQYHpmZ.js"
       ],
       "matches": [
         "<all_urls>"
@@ -65,9 +66,9 @@
         "assets/block-page-change.content.ts-ComrqY3Y.js",
         "assets/datalayer-checker.inject.ts-B1QOnbUT.js",
         "assets/datalayer-checker.content.ts-wXkMdQKM.js",
-        "assets/qol-changes.inject.ts-B-kOW8K6.js",
-        "assets/tag-assistant.inject.ts-BaL9x9P0.js",
-        "assets/qol-changes.content.ts-Cn9rY1Bz.js",
+        "assets/qol-changes.inject.ts-YFaycMvG.js",
+        "assets/tag-assistant.inject.ts-Lg7EPpyp.js",
+        "assets/qol-changes.content.ts-BS7J1QQU.js",
         "assets/shopify-sandbox.inject.ts-yX4ykfcv.js",
         "assets/shopify-sandbox.content.ts-BWeuvOOZ.js"
       ],

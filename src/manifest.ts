@@ -30,6 +30,7 @@ export default defineManifest({
     'cookies',
     'webNavigation',
     'scripting',
+    'webRequest',
   ],
   host_permissions: ['<all_urls>'],
 

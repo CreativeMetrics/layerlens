@@ -12,6 +12,7 @@
 import qolInjectedPath from '@/injected/qol-changes.inject.ts?script&module'
 import taInjectedPath  from '@/injected/tag-assistant.inject.ts?script&module'
 import * as storage from '@/lib/storage'
+import type { RuntimeMessage } from '@/types/messages'
 
 const GTM_UI = 'tagmanager.google.com'
 const TAG_ASSISTANT = 'tagassistant.google.com'
@@ -65,7 +66,32 @@ async function boot() {
   }
 
   if (host === TAG_ASSISTANT || isSgtmPreview()) {
+    // Pass saved variable-display preference to the injected page-world script.
+    const varDisplay = (await storage.get('default_variable_display')) ?? 'default'
+    document.documentElement.dataset.amdVarDisplay = varDisplay
+
     injectScript(chrome.runtime.getURL(taInjectedPath))
+
+    // Storage bridge: the page-world injected script cannot access chrome.storage,
+    // so it posts amd_set_var_display and we persist it here.
+    window.addEventListener('message', async (ev: MessageEvent) => {
+      if (ev.source !== window) return
+      const data = ev.data as { action?: string; value?: string } | undefined
+      if (!data || typeof data.action !== 'string') return
+      if (data.action === 'amd_set_var_display') {
+        const v = data.value
+        if (v === 'default' || v === 'names' || v === 'values') {
+          await storage.set({ default_variable_display: v })
+        }
+      }
+    })
+
+    // Relay GTM_IDENTIFIER from background to the injected page-world script.
+    chrome.runtime.onMessage.addListener((msg: RuntimeMessage) => {
+      if ('code' in msg && msg.code === 'GTM_IDENTIFIER') {
+        window.postMessage(msg, '*')
+      }
+    })
     return
   }
 }
