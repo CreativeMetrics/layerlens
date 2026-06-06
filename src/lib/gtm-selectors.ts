@@ -49,12 +49,13 @@ export function exists(key: SelectorKey, root: ParentNode = document): boolean {
   return resolve(key, root) != null
 }
 
-export type PageType = 'TAGS' | 'TRIGGERS' | 'VARIABLES' | 'CLIENTS' | ''
+export type PageType = 'TAGS' | 'TRIGGERS' | 'VARIABLES' | 'CLIENTS' | 'FOLDERS' | ''
 
 export function pageType(): PageType {
   if (exists('pageVariables')) return 'VARIABLES'
   if (exists('pageTags')) return 'TAGS'
   if (exists('pageTriggers')) return 'TRIGGERS'
   if (exists('pageClients')) return 'CLIENTS'
+  if (window.location.hash.includes('/folders')) return 'FOLDERS'
   return ''
 }
