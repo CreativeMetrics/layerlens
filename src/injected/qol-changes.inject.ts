@@ -11,6 +11,7 @@
 
 import {
   copyRowToNew,
+  getFolderMap,
   getRowElements,
   hasBuiltInVariables,
   renameElement,
@@ -23,7 +24,9 @@ import {
   applyFilter,
   emptyState,
   facetsFromRows,
+  foldersFromRows,
   type FilterState,
+  type FolderFacet,
 } from '@/lib/filters-engine'
 
 // Read config passed by the content script. ES modules have
@@ -51,6 +54,17 @@ let builtInVarsCollapsed = true // default: hidden, like the original
 let renameMode = false
 let copiedTableRows: unknown[] = []
 
+// Folder map: loaded once per workspace, then cached.
+let folderMap: Map<string, string> = new Map()
+let folderMapLoading = false
+// Index (1-based, for :nth-child) of the folder column in the GTM table.
+// -1 = not yet found; 0 = not present (no folder column on this page type).
+let folderColumnIndex = -1
+// Whether the one-time folder-page DOM scan has fired this session.
+let folderPageScanned = false
+let folderMapDone = false  // true after first successful (or definitively failed) attempt
+let folderMapWorkspacePath = ''
+
 // Remember the type selection per page-type for the session, so leaving and
 // coming back to a list keeps your filter. sessionStorage = convenience, not a
 // permanent setting (cleared when the tab closes).
@@ -62,6 +76,7 @@ function persistSelection() {
   try {
     sessionStorage.setItem(selectionKey(currentPage), JSON.stringify({
       types: [...state.selectedTypes],
+      folders: [...state.selectedFolders],
       pauseFilter: state.pauseFilter,
     }))
   } catch { /* sessionStorage may be unavailable; ignore */ }
@@ -71,12 +86,13 @@ function restoreSelection(page: Exclude<PageType, ''>, available: Set<string>) {
     const raw = sessionStorage.getItem(selectionKey(page))
     if (!raw) return
     const saved = JSON.parse(raw) as unknown
-    // Support both old format (plain array) and new format ({types, pauseFilter})
+    // Support old format (plain array), new format ({types, pauseFilter}), and folder-aware format
     if (Array.isArray(saved)) {
       state.selectedTypes = new Set((saved as string[]).filter((t) => available.has(t)))
     } else if (saved && typeof saved === 'object') {
-      const s = saved as { types?: string[]; pauseFilter?: string }
+      const s = saved as { types?: string[]; folders?: string[]; pauseFilter?: string }
       if (Array.isArray(s.types)) state.selectedTypes = new Set(s.types.filter((t) => available.has(t)))
+      if (Array.isArray(s.folders)) state.selectedFolders = new Set(s.folders as string[])
       if (s.pauseFilter === 'paused' || s.pauseFilter === 'active') state.pauseFilter = s.pauseFilter
     }
   } catch { /* ignore */ }
@@ -104,6 +120,157 @@ window.addEventListener('message', (ev: MessageEvent) => {
     if (currentPage === 'VARIABLES') sync(true)
   }
 })
+
+/** Load (or refresh when workspace changes) the folder ID→name map. */
+function ensureFolderMap() {
+  const match = window.location.hash.match(/accounts\/\d+\/containers\/\d+\/workspaces\/\d+/)
+  const wsPath = match ? match[0] : ''
+  if (wsPath !== folderMapWorkspacePath) {
+    folderMap = new Map()
+    folderMapWorkspacePath = wsPath
+    folderMapLoading = false
+    folderMapDone = false
+    folderPageScanned = false
+  }
+  if (folderMapDone || folderMapLoading || !wsPath) return
+  folderMapLoading = true
+  getFolderMap()
+    .then((map) => {
+      folderMap = map
+      folderMapLoading = false
+      folderMapDone = true
+      if (currentPage !== '' && map.size > 0) sync(true)
+    })
+    .catch(() => {
+      folderMapLoading = false
+      folderMapDone = true
+    })
+}
+
+/**
+ * Find the 1-based `td` index of the folder column by inspecting actual row
+ * data instead of header cells (GTM's table doesn't use standard `thead/th`).
+ *
+ * Strategy: scan the first row that has a known folder name and find which
+ * `td` cell contains exactly that text (skipping cells with links/buttons).
+ * Also recognises cells that already contain our badge (handles re-calls).
+ *
+ * Returns -1 while the table isn't ready, 0 if no folder column exists.
+ */
+function findFolderColumnIndex(rows: GtmRow[]): number {
+  if (folderColumnIndex !== -1) return folderColumnIndex
+
+  for (const r of rows) {
+    if (!r.parentFolderId) continue
+    const folderName = folderMap.get(r.parentFolderId)
+    if (!folderName) continue
+
+    const tr = (r.node.matches('tr') ? r.node : r.node.querySelector<HTMLElement>('tr')) ?? r.node
+    const cells = Array.from(tr.querySelectorAll<HTMLElement>('td'))
+    for (let i = 0; i < cells.length; i++) {
+      // Cell already contains our badge → column found
+      const badge = cells[i].querySelector<HTMLElement>('.amd-folder-badge')
+      if (badge?.dataset.amdFolderId === r.parentFolderId) {
+        folderColumnIndex = i + 1
+        return folderColumnIndex
+      }
+      // Cell contains the native folder name text (no interactive children)
+      const text = (cells[i].textContent ?? '').trim()
+      if (text === folderName && !cells[i].querySelector('a, button, input')) {
+        folderColumnIndex = i + 1
+        return folderColumnIndex
+      }
+    }
+  }
+
+  // No row with a folder found yet — keep -1 so we retry next sync.
+  // Only mark as absent (0) if rows have been checked and none have folders.
+  const anyFolder = rows.some((r) => r.parentFolderId && folderMap.has(r.parentFolderId))
+  if (anyFolder) folderColumnIndex = 0  // rows exist with folders but no matching cell
+  return folderColumnIndex
+}
+
+/** Navigate to the GTM Folders section (or a specific folder) for the current workspace. */
+function navigateToFolder(folderId?: string) {
+  const m = window.location.hash.match(/(#\/container\/accounts\/\d+\/containers\/\d+\/workspaces\/\d+)/)
+  if (m) window.location.hash = folderId ? `${m[1]}/folders/${folderId}` : `${m[1]}/folders`
+}
+
+/**
+ * Inject (or refresh) a styled folder pill.
+ *
+ * Target: the native GTM "Folder" column cell if present (detected once via
+ * `findFolderColumnIndex()`), so the pill lives exactly where the user expects.
+ * Fallback: append after the name link in the name cell.
+ *
+ * Clicking navigates to the Folders section. Yellow tint when the folder
+ * filter is active.
+ */
+function addFolderBadges(rows: GtmRow[]) {
+  if (folderMap.size === 0) return
+  const colIdx = findFolderColumnIndex(rows) // 1-based; 0 = absent; -1 = not ready
+  if (colIdx === -1) return
+
+  for (const r of rows) {
+    const tr = (r.node.matches('tr') ? r.node : r.node.querySelector<HTMLElement>('tr')) ?? r.node
+    const existing = tr.querySelector<HTMLElement>('.amd-folder-badge')
+
+    // ── No folder assigned ─────────────────────────────────────────
+    if (!r.parentFolderId) {
+      if (colIdx > 0) {
+        const folderCell = tr.querySelector<HTMLElement>(`td:nth-child(${colIdx})`)
+        if (folderCell) {
+          // Already showing the placeholder — nothing to do
+          if (existing?.dataset.amdFolderId === '' && folderCell.contains(existing)) continue
+          existing?.remove()
+          const placeholder = document.createElement('span')
+          placeholder.className = 'amd-folder-badge amd-folder-none'
+          placeholder.dataset.amdFolderId = ''
+          placeholder.textContent = '—'
+          placeholder.title = 'Nessuna cartella assegnata'
+          folderCell.replaceChildren(placeholder)
+        }
+      } else {
+        existing?.remove()
+      }
+      continue
+    }
+
+    // ── Has folder ─────────────────────────────────────────────────
+    const folderName = folderMap.get(r.parentFolderId)
+    if (!folderName) { existing?.remove(); continue }
+
+    const isActive = state.selectedFolders.has(r.parentFolderId)
+
+    if (existing?.dataset.amdFolderId === r.parentFolderId) {
+      existing.classList.toggle('amd-folder-active', isActive)
+      continue
+    }
+    existing?.remove()
+
+    const badge = document.createElement('span')
+    badge.className = 'amd-folder-badge' + (isActive ? ' amd-folder-active' : '')
+    badge.dataset.amdFolderId = r.parentFolderId
+    badge.textContent = folderName
+    badge.title = 'Vai alla cartella'
+    badge.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      sessionStorage.setItem('amd-open-folder', folderName)
+      navigateToFolder()
+    })
+
+    if (colIdx > 0) {
+      const folderCell = tr.querySelector<HTMLElement>(`td:nth-child(${colIdx})`)
+      if (folderCell) { folderCell.replaceChildren(badge); continue }
+    }
+    // Fallback: append to name cell
+    const nameCell =
+      tr.querySelector<HTMLElement>(':scope > td:nth-child(2)') ??
+      tr.querySelector<HTMLElement>('td:nth-child(2)')
+    nameCell?.appendChild(badge)
+  }
+}
 
 function injectStyleOnce() {
   if (document.getElementById('andromeda-filters-style')) return
@@ -331,7 +498,30 @@ function injectStyleOnce() {
     .amd-modal-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
     .amd-modal-save { padding: 8px 18px; background: #e5c614; color: #2c2c2a; font-weight: 600; border: none; border-radius: 9px; cursor: pointer; font-size: 13px; }
     .amd-modal-save:hover { filter: brightness(.96); }
-    .amd-modal-msg { color: #137333; font-size: 13px; }`
+    .amd-modal-msg { color: #137333; font-size: 13px; }
+    /* ── Folder badge (inline pill in the name cell) ─────────────── */
+    .amd-folder-badge {
+      display: inline-flex; align-items: center;
+      margin-left: 8px; padding: 1px 7px;
+      background: #f1f3f4; border: 1px solid #dadce0; border-radius: 999px;
+      font-size: 11px; color: #5f6368; font-weight: 500;
+      white-space: nowrap; vertical-align: middle;
+      font-family: system-ui, sans-serif; line-height: 1.5;
+      cursor: pointer; transition: background .1s, border-color .1s;
+      user-select: none;
+    }
+    .amd-folder-badge:not(.amd-folder-none):hover {
+      background: #e8eaed; border-color: #bdc1c6;
+    }
+    .amd-folder-badge.amd-folder-none {
+      opacity: 0.35; cursor: default; letter-spacing: .04em;
+    }
+    .amd-folder-badge.amd-folder-active {
+      background: #e5c614; border-color: #c9ad07; color: #2c2c2a;
+    }
+    .amd-folder-badge.amd-folder-active:hover {
+      background: #d4b412;
+    }`
   document.head.appendChild(rowStyle)
 
   const extraStyle = document.createElement('style')
@@ -382,6 +572,45 @@ function injectStyleOnce() {
     .amd-btn-append  { background: #fff; border-color: #dadce0 !important; color: #1967d2; font-weight: 500; }
     .amd-btn-replace { background: #e5c614; border-color: #e5c614 !important; color: #2c2c2a; font-weight: 600; }
     .amd-table-modal-btns button:hover { filter: brightness(.95); }
+    /* ── DataLayer variable creator modal ──────── */
+    .amd-dlv-textarea {
+      width: 100%; min-height: 72px; max-height: 140px; resize: vertical;
+      padding: 8px 10px; border: 1px solid rgba(0,0,0,.16); border-radius: 8px;
+      font: 12px/1.5 monospace; outline: none; box-sizing: border-box;
+      transition: border-color .12s, box-shadow .12s;
+    }
+    .amd-dlv-textarea:focus { border-color: #e5c614; box-shadow: 0 0 0 3px rgba(229,198,20,.25); }
+    .amd-dlv-sublabel { font-size: 12px; font-weight: 500; color: #5f6368; margin-bottom: 4px; }
+    .amd-dlv-error { color: #c5221f; font-size: 12px; margin-top: 4px; min-height: 16px; }
+    .amd-dlv-listheader { display: flex; justify-content: space-between; align-items: center; margin: 12px 0 6px; }
+    .amd-dlv-selectall { background: none; border: none; color: #1967d2; font-size: 12px; cursor: pointer; padding: 0; }
+    .amd-dlv-list { overflow-y: auto; display: flex; flex-direction: column; gap: 5px; min-height: 40px; max-height: 260px; }
+    .amd-dlv-item { display: grid; grid-template-columns: 18px 1fr 1.2fr; align-items: center; gap: 8px; }
+    .amd-dlv-item code { font-size: 11px; background: #f1f3f4; padding: 3px 6px; border-radius: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .amd-dlv-item input[type="text"] { padding: 5px 8px; border: 1px solid rgba(0,0,0,.16); border-radius: 7px; font-size: 12px; outline: none; transition: border-color .12s; }
+    .amd-dlv-item input[type="text"]:focus { border-color: #e5c614; box-shadow: 0 0 0 2px rgba(229,198,20,.2); }
+    .amd-dlv-empty { color: #80868b; font-size: 13px; font-style: italic; text-align: center; padding: 14px 0; }
+    /* ── DLV wizard sections ───────────────────── */
+    .amd-dlv-section { border: 1px solid #dadce0; border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
+    .amd-dlv-section-head { display: flex; align-items: center; gap: 8px; padding: 9px 13px; background: #f8f9fa; cursor: pointer; user-select: none; }
+    .amd-dlv-section-head:hover { background: #f1f3f4; }
+    .amd-dlv-section-toggle { width: 15px; height: 15px; accent-color: #1a73e8; flex-shrink: 0; cursor: pointer; }
+    .amd-dlv-section-title { font-size: 13px; font-weight: 600; color: #202124; flex: 1; }
+    .amd-dlv-section-badge { background: #e8f0fe; color: #1967d2; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px; min-width: 18px; text-align: center; }
+    .amd-dlv-section-badge.warn { background: #fce8e6; color: #c5221f; }
+    .amd-dlv-section-arrow { color: #80868b; font-size: 10px; transition: transform .15s; display: inline-block; }
+    .amd-dlv-section.open > .amd-dlv-section-head .amd-dlv-section-arrow { transform: rotate(180deg); }
+    .amd-dlv-section-body { padding: 12px 14px; border-top: 1px solid #e0e0e0; display: none; }
+    .amd-dlv-section.open > .amd-dlv-section-body { display: block; }
+    .amd-dlv-field { margin-bottom: 10px; }
+    .amd-dlv-field:last-child { margin-bottom: 0; }
+    .amd-dlv-field > label { display: block; font-size: 12px; color: #5f6368; margin-bottom: 3px; font-weight: 500; }
+    .amd-dlv-field input[type="text"], .amd-dlv-field select { width: 100%; padding: 7px 10px; border: 1px solid rgba(0,0,0,.16); border-radius: 8px; font-size: 13px; outline: none; box-sizing: border-box; transition: border-color .12s, box-shadow .12s; }
+    .amd-dlv-field input[type="text"]:focus, .amd-dlv-field select:focus { border-color: #e5c614; box-shadow: 0 0 0 3px rgba(229,198,20,.25); }
+    .amd-dlv-radios { display: flex; gap: 16px; align-items: center; }
+    .amd-dlv-radios label { font-size: 13px; color: #202124; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+    .amd-dlv-note { font-size: 12px; color: #80868b; font-style: italic; margin-top: 6px; }
+    .amd-dlv-section-disabled .amd-dlv-section-body { opacity: .45; pointer-events: none; }
   `
   document.head.appendChild(extraStyle)
 }
@@ -551,7 +780,7 @@ function addCopyIcons(rows: GtmRow[]) {
       (ev) => {
         ev.preventDefault()
         ev.stopPropagation()
-        copyRowToNew(currentPage as Exclude<PageType, ''>, icon, (ok) => {
+        copyRowToNew(currentPage as Exclude<PageType, '' | 'FOLDERS'>, icon, (ok) => {
           icon.classList.add(ok ? 'amd-copy-ok' : 'amd-copy-err')
           setTimeout(() => icon.classList.remove('amd-copy-ok', 'amd-copy-err'), 1200)
         })
@@ -629,13 +858,15 @@ function renderToolbar(rows: GtmRow[]) {
 
   let facets: ReturnType<typeof facetsFromRows> = []
   try { facets = facetsFromRows(rows) } catch { /* ignore */ }
+  let folderFacets: FolderFacet[] = []
+  try { folderFacets = foldersFromRows(rows, folderMap) } catch { /* ignore */ }
 
   if (currentPage !== '' && state.selectedTypes.size === 0 && state.pauseFilter === 'all')
-    restoreSelection(currentPage as Exclude<PageType, ''>, new Set(facets.map((f) => f.type)))
+    restoreSelection(currentPage as Exclude<PageType, '' | 'FOLDERS'>, new Set(facets.map((f) => f.type)))
 
   const commit = () => {
     persistSelection()
-    applyToDom(getRowElements(currentPage as Exclude<PageType, ''>))
+    applyToDom(getRowElements(currentPage as Exclude<PageType, '' | 'FOLDERS'>))
     renderBar()
   }
 
@@ -749,17 +980,75 @@ function renderToolbar(rows: GtmRow[]) {
   ddFooter.appendChild(ddReset)
   dropdown.appendChild(ddFooter)
 
+  // ── Folder dropdown (separate button, built only when folders exist) ──────────
+  let folderDropdown: HTMLDivElement | null = null
+  if (folderFacets.length > 0) {
+    folderDropdown = document.createElement('div')
+    folderDropdown.className = 'amd-dropdown'
+
+    const fdHead = document.createElement('div')
+    fdHead.className = 'amd-dropdown-head'
+    fdHead.textContent = 'Cartella'
+    const fdClose = document.createElement('button')
+    fdClose.type = 'button'
+    fdClose.className = 'amd-dropdown-close'
+    fdClose.textContent = '×'
+    fdClose.addEventListener('click', () => folderDropdown!.classList.remove('open'))
+    fdHead.appendChild(fdClose)
+    folderDropdown.appendChild(fdHead)
+
+    const fdList = document.createElement('div')
+    fdList.className = 'amd-dropdown-types'
+    for (const facet of folderFacets) {
+      const row = document.createElement('label')
+      row.className = 'amd-dropdown-check'
+      const cb = document.createElement('input')
+      cb.type = 'checkbox'
+      cb.checked = state.selectedFolders.has(facet.folderId)
+      cb.addEventListener('change', () => {
+        if (cb.checked) state.selectedFolders.add(facet.folderId)
+        else state.selectedFolders.delete(facet.folderId)
+        commit()
+      })
+      const name = document.createElement('span')
+      name.className = 'amd-dc-name'
+      name.textContent = facet.name
+      const cnt = document.createElement('span')
+      cnt.className = 'amd-dc-count'
+      cnt.textContent = `${facet.count}`
+      row.append(cb, name, cnt)
+      fdList.appendChild(row)
+    }
+    folderDropdown.appendChild(fdList)
+
+    const fdFooter = document.createElement('div')
+    fdFooter.className = 'amd-dropdown-footer'
+    const fdReset = document.createElement('button')
+    fdReset.type = 'button'
+    fdReset.className = 'amd-dropdown-reset'
+    fdReset.textContent = 'Azzera'
+    fdReset.addEventListener('click', () => {
+      state.selectedFolders.clear()
+      folderDropdown!.classList.remove('open')
+      commit()
+    })
+    fdFooter.appendChild(fdReset)
+    folderDropdown.appendChild(fdFooter)
+  }
+
   // ── bar content ───────────────────────────────────────────────────────────────
   const renderBar = () => {
     // Remove all children except the dropdown (re-added at end)
     bar!.replaceChildren()
 
-    const activeCount = state.selectedTypes.size + (state.pauseFilter !== 'all' ? 1 : 0)
+    const typeActiveCount = state.selectedTypes.size + (state.pauseFilter !== 'all' ? 1 : 0)
+    const folderActiveCount = state.selectedFolders.size
+    const activeCount = typeActiveCount + folderActiveCount
 
-    // Filter trigger button
+    // Filter trigger button ("Filtri")
     const btn = document.createElement('button')
     btn.type = 'button'
-    btn.className = 'amd-filter-btn' + (activeCount > 0 ? ' active' : '')
+    btn.className = 'amd-filter-btn' + (typeActiveCount > 0 ? ' active' : '')
 
     // SVG funnel icon
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
@@ -774,10 +1063,10 @@ function renderToolbar(rows: GtmRow[]) {
 
     const btnLabel = document.createTextNode(' Filtri')
     btn.appendChild(btnLabel)
-    if (activeCount > 0) {
+    if (typeActiveCount > 0) {
       const badge = document.createElement('span')
       badge.className = 'amd-filter-badge'
-      badge.textContent = String(activeCount)
+      badge.textContent = String(typeActiveCount)
       btn.appendChild(badge)
     }
     const arrow = document.createElement('span')
@@ -786,6 +1075,7 @@ function renderToolbar(rows: GtmRow[]) {
     btn.appendChild(arrow)
     btn.addEventListener('click', (e) => {
       e.stopPropagation()
+      folderDropdown?.classList.remove('open')
       const isOpen = dropdown.classList.toggle('open')
       if (isOpen) {
         ddSearch.value = ''
@@ -795,10 +1085,53 @@ function renderToolbar(rows: GtmRow[]) {
     bar!.appendChild(btn)
     bar!.appendChild(dropdown)
 
-    // Active type chips (removable, inline)
-    if (state.selectedTypes.size > 0) {
+    // Folder filter button ("Cartella ▾") — only when folders exist
+    if (folderDropdown) {
+      const folderBtn = document.createElement('button')
+      folderBtn.type = 'button'
+      folderBtn.className = 'amd-filter-btn amd-folder-btn' + (folderActiveCount > 0 ? ' active' : '')
+
+      // folder SVG icon
+      const fSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      fSvg.setAttribute('viewBox', '0 0 16 16')
+      fSvg.setAttribute('width', '14')
+      fSvg.setAttribute('height', '14')
+      fSvg.setAttribute('fill', 'currentColor')
+      const fPath = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      fPath.setAttribute('d', 'M.54 3.87.5 3a2 2 0 0 1 2-2h3.19a2 2 0 0 1 1.45.63l.45.52A2 2 0 0 0 9.04 3H13.5a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2H2.5a2 2 0 0 1-2-2V3.87z')
+      fSvg.appendChild(fPath)
+      folderBtn.appendChild(fSvg)
+
+      folderBtn.appendChild(document.createTextNode(' Cartella'))
+      if (folderActiveCount > 0) {
+        const fBadge = document.createElement('span')
+        fBadge.className = 'amd-filter-badge'
+        fBadge.textContent = String(folderActiveCount)
+        folderBtn.appendChild(fBadge)
+      }
+      const fArrow = document.createElement('span')
+      fArrow.className = 'amd-filter-arrow'
+      fArrow.textContent = '▾'
+      folderBtn.appendChild(fArrow)
+      folderBtn.addEventListener('click', (e) => {
+        e.stopPropagation()
+        dropdown.classList.remove('open')
+        // Position the folder dropdown below this button
+        const rect = folderBtn.getBoundingClientRect()
+        const barRect = bar!.getBoundingClientRect()
+        folderDropdown!.style.left = `${Math.round(rect.left - barRect.left)}px`
+        folderDropdown!.classList.toggle('open')
+      })
+      bar!.appendChild(folderBtn)
+      bar!.appendChild(folderDropdown)
+    }
+
+    // Active filter chips (type + pause + folder), shown whenever any filter is on
+    if (activeCount > 0) {
       const chipWrap = document.createElement('div')
       chipWrap.className = 'amd-active-chips'
+
+      // Type chips
       for (const type of state.selectedTypes) {
         const facet = facets.find((f) => f.type === type)
         if (!facet) continue
@@ -818,6 +1151,7 @@ function renderToolbar(rows: GtmRow[]) {
         })
         chipWrap.appendChild(chip)
       }
+
       // Pause filter chip
       if (state.pauseFilter !== 'all') {
         const pauseChip = document.createElement('button')
@@ -835,6 +1169,27 @@ function renderToolbar(rows: GtmRow[]) {
         })
         chipWrap.appendChild(pauseChip)
       }
+
+      // Folder chips
+      for (const fid of state.selectedFolders) {
+        const folderName = folderMap.get(fid) ?? (fid === '' ? 'Senza cartella' : fid)
+        const chip = document.createElement('button')
+        chip.type = 'button'
+        chip.className = 'amd-active-chip'
+        chip.title = `Rimuovi filtro cartella: ${folderName}`
+        const chipName = document.createElement('span')
+        chipName.textContent = folderName
+        const chipX = document.createElement('span')
+        chipX.className = 'amd-chip-x'
+        chipX.textContent = '×'
+        chip.append(chipName, chipX)
+        chip.addEventListener('click', () => {
+          state.selectedFolders.delete(fid)
+          commit()
+        })
+        chipWrap.appendChild(chip)
+      }
+
       bar!.appendChild(chipWrap)
     }
 
@@ -903,9 +1258,17 @@ function renderToolbar(rows: GtmRow[]) {
       editBtn.textContent = 'Etichette tipi…'
       editBtn.addEventListener('click', () => openLabelEditor())
       bar!.appendChild(editBtn)
+
+      const dlvBtn = document.createElement('button')
+      dlvBtn.type = 'button'
+      dlvBtn.className = 'amd-builtin-toggle'
+      dlvBtn.textContent = 'Da push datalayer…'
+      dlvBtn.title = 'Crea variabili "Variabile livello dati" da un push JSON'
+      dlvBtn.addEventListener('click', () => showDlvFromPushModal())
+      bar!.appendChild(dlvBtn)
     }
 
-    updateVisibleCount(getRowElements(currentPage as Exclude<PageType, ''>))
+    updateVisibleCount(getRowElements(currentPage as Exclude<PageType, '' | 'FOLDERS'>))
   }
 
   renderBar()
@@ -927,7 +1290,7 @@ function renderToolbar(rows: GtmRow[]) {
     nativeSearch.dataset.amdBound = '1'
     nativeSearch.addEventListener('input', () => {
       requestAnimationFrame(() =>
-        updateVisibleCount(getRowElements(currentPage as Exclude<PageType, ''>)),
+        updateVisibleCount(getRowElements(currentPage as Exclude<PageType, '' | 'FOLDERS'>)),
       )
     })
   }
@@ -1111,6 +1474,264 @@ function initBulkSelection() {
   )
 }
 
+// ── Folder page constants ────────────────────────────────────────────────────
+const FOLDER_TOOLBAR_ID = 'amd-folder-toolbar'
+const FOLDER_STYLE_ID   = 'amd-folder-styles'
+let folderSearchQuery   = ''
+
+/** Stable color derived from folder name (for accent bars + stats). */
+function folderColor(name: string): string {
+  let h = 0
+  for (const c of name) h = ((h * 31 + c.charCodeAt(0)) | 0)
+  const palette = ['#4285f4','#0f9d58','#9c27b0','#f4b400','#db4437','#00bcd4','#ff5722','#607d8b']
+  return palette[Math.abs(h) % palette.length]
+}
+
+/** Folder name without the "(N)" count from the h3. */
+function folderCardName(card: HTMLElement): string {
+  const h3 = card.querySelector('.gtm-folder-name h3')
+  if (!h3) return ''
+  const clone = h3.cloneNode(true) as HTMLElement
+  clone.querySelectorAll('span').forEach((s) => s.remove())
+  // After removing count spans the text is "Name () " — strip trailing empty parens
+  return (clone.textContent ?? '').trim().replace(/\s*\(\s*\)\s*$/, '').trim()
+}
+
+function injectFolderPageStyles() {
+  if (document.getElementById(FOLDER_STYLE_ID)) return
+  const s = document.createElement('style')
+  s.id = FOLDER_STYLE_ID
+  s.textContent = `
+    /* ── Folder page toolbar ─────────────────────────────── */
+    #${FOLDER_TOOLBAR_ID} {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; margin-bottom: 10px;
+      background: #fff; border: 1px solid rgba(0,0,0,.1);
+      border-radius: 10px; font: 13px/1.4 system-ui, Roboto, Arial, sans-serif;
+    }
+    #${FOLDER_TOOLBAR_ID} .amd-fl-search {
+      flex: 1; padding: 6px 11px; border: 1px solid rgba(0,0,0,.16);
+      border-radius: 8px; font: 13px/1.4 system-ui, sans-serif;
+      outline: none; transition: border-color .12s;
+    }
+    #${FOLDER_TOOLBAR_ID} .amd-fl-search:focus {
+      border-color: #e5c614; box-shadow: 0 0 0 2px rgba(229,198,20,.2);
+    }
+    #${FOLDER_TOOLBAR_ID} .amd-fl-count { font-size:12px; color:#5f6368; white-space:nowrap; }
+    /* ── Folder cards visual redesign ───────────────────── */
+    .gtm-folder-card {
+      position: relative !important;
+      border-radius: 10px !important; overflow: hidden !important;
+      box-shadow: 0 1px 5px rgba(0,0,0,.09) !important;
+      transition: box-shadow .15s !important;
+    }
+    .gtm-folder-card:hover { box-shadow: 0 3px 14px rgba(0,0,0,.14) !important; }
+    .gtm-folder-name {
+      display: flex !important; align-items: center !important;
+      background: #fafafa !important; border-bottom: 1px solid rgba(0,0,0,.06) !important;
+    }
+    .gtm-folder-name h3 { font-size:14px !important; font-weight:600 !important; color:#202124 !important; }
+    /* ── Accent block (full-height left color strip) ────── */
+    .amd-folder-accent {
+      position: absolute; left: 0; top: 0; bottom: 0;
+      width: 6px; flex-shrink: 0; pointer-events: none;
+    }
+    .gtm-folder-name h3 { margin-left: 12px !important; }
+    /* ── Stats pills ─────────────────────────────────────── */
+    .amd-folder-stats {
+      margin-left: auto; margin-right: 10px;
+      display: flex; gap: 5px; align-items: center;
+    }
+    .amd-folder-stat {
+      display: inline-flex; align-items: center;
+      padding: 2px 7px; border-radius: 999px;
+      font: 500 11px/1.5 system-ui, sans-serif;
+    }
+    .amd-fs-tag      { background:#e8f0fe; color:#1a73e8; }
+    .amd-fs-trigger  { background:#e6f4ea; color:#188038; }
+    .amd-fs-variable { background:#fce8e6; color:#c5221f; }
+    .amd-fs-client   { background:#fef9e7; color:#e37400; }
+    /* ── Search hide ────────────────────────────────────── */
+    .gtm-folder-card.amd-fl-hidden { display: none !important; }
+  `
+  document.head.appendChild(s)
+}
+
+function injectFolderToolbar(cards: HTMLElement[]) {
+  if (document.getElementById(FOLDER_TOOLBAR_ID)) {
+    applyFolderSearch(cards)
+    return
+  }
+  const bar = document.createElement('div')
+  bar.id = FOLDER_TOOLBAR_ID
+  cards[0].insertAdjacentElement('beforebegin', bar)
+
+  const input = document.createElement('input')
+  input.type = 'search'
+  input.className = 'amd-fl-search'
+  input.placeholder = 'Cerca cartella…'
+  input.value = folderSearchQuery
+  input.addEventListener('input', () => {
+    folderSearchQuery = input.value.trim().toLowerCase()
+    applyFolderSearch(cards)
+    updateFolderCount(cards)
+  })
+  bar.appendChild(input)
+
+  const counter = document.createElement('span')
+  counter.className = 'amd-fl-count'
+  counter.id = 'amd-fl-count'
+  bar.appendChild(counter)
+  updateFolderCount(cards)
+}
+
+function applyFolderSearch(cards: HTMLElement[]) {
+  for (const card of cards) {
+    const name = folderCardName(card).toLowerCase()
+    card.classList.toggle('amd-fl-hidden', !!folderSearchQuery && !name.includes(folderSearchQuery))
+  }
+  updateFolderCount(cards)
+}
+
+function updateFolderCount(cards: HTMLElement[]) {
+  const el = document.getElementById('amd-fl-count')
+  if (!el) return
+  const visible = cards.filter((c) => !c.classList.contains('amd-fl-hidden')).length
+  el.textContent = `${visible} di ${cards.length} cartel${visible === 1 ? 'la' : 'le'}`
+}
+
+function enhanceFolderCard(card: HTMLElement) {
+  const header = card.querySelector<HTMLElement>('.gtm-folder-name')
+  if (!header) return
+
+  // Colored left accent bar spanning full card height (injected once)
+  if (!card.querySelector('.amd-folder-accent')) {
+    const name  = folderCardName(card)
+    const color = folderColor(name || 'unfiled')
+    const bar   = document.createElement('div')
+    bar.className = 'amd-folder-accent'
+    bar.style.background = color
+    card.insertBefore(bar, card.firstChild)
+  }
+
+  // Stats pills from Angular scope (injected once; silently skipped if unavailable)
+  if (!header.querySelector('.amd-folder-stats')) {
+    try {
+      const scope  = window.angular?.element(card).scope() as Record<string, unknown> | undefined
+      const folder = scope?.['folder'] as Record<string, unknown> | undefined
+      if (folder) {
+        const count = (key: string) => {
+          const v = folder[key]
+          return Array.isArray(v) ? v.length : typeof v === 'number' ? v : 0
+        }
+        const tags      = count('tagList')      || count('tags')
+        const triggers  = count('triggerList')  || count('triggers')
+        const variables = count('variableList') || count('variables')
+        const clients   = count('clientList')   || count('clients')
+        if (tags + triggers + variables + clients > 0) {
+          const stats = document.createElement('div')
+          stats.className = 'amd-folder-stats'
+          const pill = (n: number, label: string, cls: string) => {
+            if (!n) return
+            const p = document.createElement('span')
+            p.className = `amd-folder-stat ${cls}`
+            p.textContent = `${n} ${label}`
+            stats.appendChild(p)
+          }
+          pill(tags,      'tag',     'amd-fs-tag')
+          pill(triggers,  'trigger', 'amd-fs-trigger')
+          pill(variables, 'var',     'amd-fs-variable')
+          pill(clients,   'client',  'amd-fs-client')
+          header.appendChild(stats)
+        }
+      }
+    } catch { /* Angular debug info disabled — skip stats */ }
+  }
+}
+
+/** Folder-page handler (called by sync when page === 'FOLDERS'). */
+function syncFolderPage() {
+  // Do NOT call ensureFolderMap() here: folderService.getList() called from
+  // the Folders page uses an empty context (triggers a 404) because the Angular
+  // app state lacks workspace coordinates on that route.  The map is loaded
+  // correctly from the Tags/Triggers/Variables pages where context is valid.
+  if (!folderPageScanned) scanFolderPageDom()
+
+  const page = document.querySelector('.gtm-folder-page')
+  if (!page) return
+  const cards = Array.from(page.querySelectorAll<HTMLElement>('.gtm-folder-card'))
+  if (cards.length === 0) return
+
+  injectFolderPageStyles()
+  injectFolderToolbar(cards)
+  for (const card of cards) enhanceFolderCard(card)
+
+  // Auto-open folder card if we navigated here from a pill click
+  const pendingFolder = sessionStorage.getItem('amd-open-folder')
+  if (pendingFolder) {
+    sessionStorage.removeItem('amd-open-folder')
+    setTimeout(() => {
+      const allCards = Array.from(document.querySelectorAll<HTMLElement>('.gtm-folder-card'))
+      const target = allCards.find((c) => folderCardName(c) === pendingFolder)
+      if (!target) return
+      // Try Angular scope toggle first, fall back to DOM click
+      let opened = false
+      try {
+        const scope = window.angular?.element(target).scope() as Record<string, unknown> | undefined
+        if (scope) {
+          for (const key of ['isExpanded', 'expanded', 'isOpen', 'open', 'show', 'showContent']) {
+            if (key in scope && typeof scope[key] === 'boolean' && !scope[key]) {
+              scope[key] = true
+              ;(scope as { $apply?: () => void }).$apply?.()
+              opened = true
+              break
+            }
+          }
+        }
+      } catch { /* Angular debug info disabled */ }
+      if (!opened) {
+        // Click the unfold-more icon (expand toggle); fall back to header div
+        const clickTarget =
+          target.querySelector<HTMLElement>('.gtm-unfold-more-icon') ??
+          target.querySelector<HTMLElement>('.gtm-folder-name') ??
+          target
+        clickTarget.click()
+      }
+      setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'center' }), 200)
+    }, 500)
+  }
+}
+
+/**
+ * One-time DOM scan — retries until Angular has rendered the folder rows.
+ * Looks for [gtm-table-row] elements inside the folder page, then walks up
+ * the ancestor chain to map the full section structure.
+ */
+function scanFolderPageDom(attempt = 0) {
+  const page = document.querySelector('.gtm-folder-page')
+  if (!page) { if (attempt < 8) setTimeout(() => scanFolderPageDom(attempt + 1), 300); return }
+
+  // The page always has 2 header divs; wait until Angular adds folder sections
+  const allChildren = Array.from(page.children)
+  const sections = allChildren.filter((el) => !el.classList.contains('gtm-folder-header'))
+  if (sections.length === 0) {
+    if (attempt < 12) setTimeout(() => scanFolderPageDom(attempt + 1), 300)
+    return
+  }
+
+  folderPageScanned = true
+
+  // Log the non-header sections
+  const sectionInfo = sections.map((el) => ({
+    tag: el.tagName,
+    class: (el as HTMLElement).className,
+    childCount: el.children.length,
+    innerHTML200: (el as HTMLElement).innerHTML.slice(0, 200),
+  }))
+  console.log('[LL] folder sections found:', sectionInfo)
+  console.log('[LL] first section outerHTML[:1200]:', (sections[0] as HTMLElement).outerHTML.slice(0, 1200))
+}
+
 /** Re-read rows and refresh toolbar + visibility. `rebuild` re-renders chips. */
 function sync(rebuild = false) {
   const page = pageType()
@@ -1119,16 +1740,27 @@ function sync(rebuild = false) {
     currentPage = ''
     return
   }
+  if (page === 'FOLDERS') {
+    if (page !== currentPage) { currentPage = page; rebuild = true }
+    syncFolderPage()
+    return
+  }
   if (page !== currentPage) {
     currentPage = page
     state = emptyState() // reset when moving between tags/triggers/variables
     renameMode = false   // cancel any in-progress rename when navigating
+    folderColumnIndex = -1 // re-detect folder column on page type change
     rebuild = true
   }
+  // Kick off folder data load (no-op if already loaded or loading)
+  ensureFolderMap()
   const rows = getRowElements(page)
   const bar = document.getElementById(TOOLBAR_ID)
   if (rows.length === 0) return
-  if (rebuild || !bar || !bar.isConnected) {
+  // Rebuild when folder data has arrived but the toolbar was built before it was
+  // available (no .amd-folder-btn in the bar yet, even though folders now exist).
+  const folderBtnMissing = folderMap.size > 0 && !bar?.querySelector('.amd-folder-btn')
+  if (rebuild || !bar || !bar.isConnected || folderBtnMissing) {
     injectStyleOnce()
     renderToolbar(rows)
   }
@@ -1136,6 +1768,7 @@ function sync(rebuild = false) {
   if (page === 'VARIABLES' && builtInVarsCollapsed) setBuiltInVariablesCollapsed(true)
   applyToDom(rows)
   addTypeIcons(rows)
+  addFolderBadges(rows)
   addCopyIcons(rows)
   addPauseIcons(rows)
   initBulkSelection()
@@ -1147,7 +1780,7 @@ function sync(rebuild = false) {
 function enterRenameMode() {
   if (currentPage === '') return
   renameMode = true
-  renderToolbar(getRowElements(currentPage as Exclude<PageType, ''>))
+  renderToolbar(getRowElements(currentPage as Exclude<PageType, '' | 'FOLDERS'>))
 
   for (const rowEl of document.querySelectorAll<HTMLElement>('[gtm-table-row]')) {
     if (rowEl.querySelector('.amd-rename-input')) continue
@@ -1181,12 +1814,12 @@ function exitRenameMode() {
     if (link?.tagName === 'A') link.style.display = ''
     input.remove()
   }
-  renderToolbar(getRowElements(currentPage as Exclude<PageType, ''>))
+  renderToolbar(getRowElements(currentPage as Exclude<PageType, '' | 'FOLDERS'>))
 }
 
 function confirmRenames() {
   if (currentPage === '') return
-  const page = currentPage as Exclude<PageType, ''>
+  const page = currentPage as Exclude<PageType, '' | 'FOLDERS'>
 
   const changes = Array.from(document.querySelectorAll<HTMLInputElement>('.amd-rename-input'))
     .map((input) => ({
@@ -1438,6 +2071,9 @@ function copyTable() {
   const items = getTableListItemArray()
   if (!items) { showToast('Tabella non trovata'); return }
   copiedTableRows = JSON.parse(JSON.stringify(items)) as unknown[]
+  // Write TSV to system clipboard so paste works across tabs and Chrome profiles
+  const tsv = items.map((r) => `${r.mapValue[0]?.string ?? ''}\t${r.mapValue[1]?.string ?? ''}`).join('\n')
+  navigator.clipboard.writeText(tsv).catch(() => {})
   showToast(`${items.length} rig${items.length === 1 ? 'a' : 'he'} copiata`)
 }
 
@@ -1526,6 +2162,770 @@ function showTablePasteModal(): Promise<'replace' | 'append' | 'cancel'> {
   })
 }
 
+// ── DataLayer Variable creator ────────────────────────────────────────────────
+
+/** Normalise JS/JSON push text so JSON.parse can handle it:
+ *  - strips dataLayer.push( ... ) wrapper
+ *  - joins JS string concatenations: "foo" + "bar" → "foobar"
+ *  - quotes unquoted JS object keys (incl. dotted keys like gtm.uniqueEventId)
+ *  - removes trailing commas before } or ] */
+function preprocessJsPush(raw: string): string {
+  let s = raw.trim()
+  // Strip dataLayer.push( ... ) or window.dataLayer.push( ... ) wrapper
+  const wrapMatch = s.match(/^(?:window\.)?dataLayer\.push\(\s*([\s\S]*?)\s*\)\s*;?\s*$/)
+  if (wrapMatch) s = wrapMatch[1].trim()
+  // Join JS string concatenations: "abc" + "def" → "abcdef"
+  s = s.replace(/"\s*\+\s*"/g, '')
+  // Quote unquoted JS object keys (e.g. event: → "event":, gtm.uniqueEventId: → "gtm.uniqueEventId":)
+  // Only matches after { or , so already-quoted keys and string values are unaffected
+  s = s.replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_.$]*)\s*:/g, '$1"$2":')
+  // Remove trailing commas before closing brace/bracket
+  s = s.replace(/,(\s*[}\]])/g, '$1')
+  return s
+}
+
+/** Extract all dot-notation paths from a dataLayer push object.
+ *  Arrays are treated as leaf nodes; `event` is skipped (GTM built-in). */
+function parseDataLayerPaths(obj: unknown, prefix = ''): string[] {
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+    return prefix ? [prefix] : []
+  }
+  const paths: string[] = []
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (!prefix && (k === 'event' || k.startsWith('gtm.'))) continue
+    const path = prefix ? `${prefix}.${k}` : k
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      const nested = parseDataLayerPaths(v, path)
+      paths.push(...(nested.length > 0 ? nested : [path]))
+    } else {
+      paths.push(path)
+    }
+  }
+  return paths
+}
+
+async function createDlvVariables(
+  entries: Array<{ path: string; name: string }>,
+): Promise<{ ok: number; fail: number; skipped: number }> {
+  let ok = 0
+  let fail = 0
+  let skipped = 0
+  try {
+    const inj = window.angular?.element(document.body).injector()
+    if (!inj) return { ok: 0, fail: entries.length, skipped: 0 }
+
+    type DlvSvc = {
+      get: (key: unknown) => Promise<{ data: Record<string, unknown> }>
+      create: (ctx: unknown, p: { data: unknown }) => Promise<unknown>
+      getList?: (ctx: unknown) => { $$state?: { value?: unknown[] } }
+    }
+    let svc: DlvSvc | null = null
+    for (const n of ['variableService', 'serverVariableService']) {
+      try {
+        const s = inj.get<DlvSvc>(n)
+        if (s && typeof s.create === 'function') { svc = s; break }
+      } catch { /* try next */ }
+    }
+    if (!svc) return { ok: 0, fail: entries.length, skipped: 0 }
+
+    let context: unknown
+    try { context = inj.get<{ getContext?: () => unknown }>('appStateService')?.getContext?.() } catch { /* ignore */ }
+
+    const existingNames = new Set<string>()
+    const existingDlPaths = new Set<string>()
+    let templateKey: unknown = null
+    const list = svc.getList?.(context)?.$$state?.value ?? []
+    for (const e of list) {
+      const entry = ((e as Record<string, unknown>)['variable'] ?? e) as Record<string, unknown>
+      const d = entry['data'] as Record<string, unknown> | undefined
+      const n = d?.['name']
+      if (typeof n === 'string') existingNames.add(n)
+      const params = d?.['parameter'] as Array<Record<string, unknown>> | undefined
+      // DL Variable: check both Angular internal format (vendorTemplate) and REST API format (type)
+      const vendorPublicId = ((d?.['vendorTemplate'] as Record<string, unknown> | undefined)?.['key'] as Record<string, unknown> | undefined)?.['publicId']
+      const isDlv = vendorPublicId === 'v' || d?.['type'] === 'v'
+      if (isDlv) {
+        const pathParam = params?.find((p) => p['key'] === 'name')
+        if (typeof pathParam?.['value'] === 'string') existingDlPaths.add(pathParam['value'])
+        if (templateKey == null) templateKey = entry['key']
+      }
+      // Track any variable key as shell fallback (used only when no DL variable exists)
+      if (entry['key'] != null && !(templateKey != null)) {
+        // store as fallbackKey only if no dlv template yet — use first entry seen
+      }
+    }
+
+    // Also track a generic fallback key (first variable of any type) for workspaces with no DL var
+    let shellKey: unknown = null
+    for (const e of list) {
+      const entry = ((e as Record<string, unknown>)['variable'] ?? e) as Record<string, unknown>
+      if (entry['key'] != null) { shellKey = entry['key']; break }
+    }
+
+    // Fetch the full data of the template variable so the payload has all GTM-required fields
+    let templateData: Record<string, unknown> | null = null
+    const fetchKey = templateKey ?? shellKey
+    if (fetchKey != null) {
+      try {
+        const fetched = await svc.get(fetchKey)
+        templateData = fetched.data
+        // If we used a non-DL shell, strip type-specific fields before using it as base
+        if (templateKey == null) {
+          delete templateData['variableId']
+          delete templateData['fingerprint']
+          delete templateData['type']
+          delete templateData['vendorTemplate']
+          delete templateData['formatValue']
+          delete templateData['parameter']
+        }
+      } catch (e) {
+        console.warn('[LayerLens] createDlvVariables: could not fetch template variable', e)
+      }
+    }
+
+    for (const entry of entries) {
+      // Skip if a variable with this exact name already exists (list data doesn't include
+      // the full parameter array, so path-based dedup is not reliable here)
+      if (existingNames.has(entry.name)) { skipped++; continue }
+      try {
+        let finalName = entry.name
+        while (existingNames.has(finalName)) finalName += ' - Copy'
+
+        let varData: Record<string, unknown>
+        if (templateData != null) {
+          varData = JSON.parse(JSON.stringify(templateData)) as Record<string, unknown>
+          varData['name'] = finalName
+          if (templateKey != null) {
+            // Exact DL variable template: update path parameter in place
+            const params = varData['parameter'] as Array<Record<string, unknown>> | undefined
+            const nameParam = params?.find((p) => p['key'] === 'name')
+            if (nameParam) nameParam['value'] = entry.path
+            else params?.push({ key: 'name', type: 'TEMPLATE', value: entry.path })
+          } else {
+            // Non-DL shell: type-specific fields already stripped, add DL fields
+            varData['type'] = 'v'
+            varData['parameter'] = [
+              { key: 'name', type: 'TEMPLATE', value: entry.path },
+              { key: 'dataLayerVersion', type: 'INTEGER', value: '2' },
+            ]
+          }
+        } else {
+          // No variables at all in workspace — minimal from-scratch (requires workspace IDs in ctx)
+          varData = {
+            name: finalName,
+            type: 'v',
+            parameter: [
+              { key: 'name', type: 'TEMPLATE', value: entry.path },
+              { key: 'dataLayerVersion', type: 'INTEGER', value: '2' },
+            ],
+          }
+        }
+
+        await svc.create(context, { data: varData })
+        existingNames.add(finalName)
+        ok++
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : JSON.stringify(err)
+        console.warn('[LayerLens] createDlvVariables: failed to create', entry.name, msg, err)
+        fail++
+      }
+    }
+  } catch (err) {
+    console.warn('[LayerLens] createDlvVariables: error', err)
+    return { ok, fail: fail + (entries.length - ok - fail), skipped: 0 }
+  }
+  return { ok, fail, skipped }
+}
+
+async function getGA4ConfigTags(): Promise<Array<{ name: string; key: unknown }>> {
+  try {
+    const inj = window.angular?.element(document.body).injector()
+    if (!inj) return []
+    type Svc = { getList?: (ctx: unknown) => { $$state?: { value?: unknown[] } } }
+    let svc: Svc | null = null
+    for (const n of ['tagService', 'serverTagService', 'sTagService']) {
+      try { const s = inj.get<Svc>(n); if (s) { svc = s; break } } catch { /* try next */ }
+    }
+    if (!svc) return []
+    let ctx: unknown
+    try { ctx = inj.get<{ getContext?: () => unknown }>('appStateService')?.getContext?.() } catch { /* ignore */ }
+    const list = svc.getList?.(ctx)?.$$state?.value ?? []
+    const out: Array<{ name: string; key: unknown }> = []
+    for (const e of list) {
+      const entry = ((e as Record<string, unknown>)['tag'] ?? e) as Record<string, unknown>
+      const d = entry['data'] as Record<string, unknown> | undefined
+      const pid = ((d?.['vendorTemplate'] as Record<string, unknown> | undefined)?.['key'] as Record<string, unknown> | undefined)?.['publicId']
+      if (pid === 'gaawc') out.push({ name: String(d?.['name'] ?? ''), key: entry['key'] })
+    }
+    return out
+  } catch { return [] }
+}
+
+// Fields specific to trigger types — stripped when converting a base trigger to custom event
+const TRIG_TYPE_FIELDS = ['customEventFilter', 'filter', 'autoEventFilter', 'checkValidation',
+  'waitForTags', 'waitForTagsTimeout', 'interval', 'intervalStartTimer',
+  'scrollThreshold', 'scrollUnit', 'visibilitySelector', 'visibilityMaxOnScreenTime',
+  'visibilityMinOnScreenTime', 'horizontalScrollPercentageList', 'verticalScrollPercentageList',
+  'limit', 'typeDisplayName', 'triggerId', 'fingerprint',
+  'jsErrorListener',   // JavaScript Error trigger field
+  'clickListener', 'formListener', 'linkClickListener',  // click/form trigger fields
+  'visibilityListener', 'timerListener', 'scrollListener', 'historyListener']
+
+async function createCustomEventTrigger(p: {
+  name: string; eventName: string; matchType: 'EQUALS' | 'CONTAINS' | 'MATCH_REGEX'
+}): Promise<{ ok: boolean; created?: boolean; triggerId?: number }> {
+  const existingTriggers = new Map<string, { key: unknown; type: unknown }>()
+  let CE_TYPE = 4
+  try {
+    const inj = window.angular?.element(document.body).injector()
+    if (!inj) return { ok: false }
+    type TrigSvc = {
+      get: (k: unknown) => Promise<{ data: Record<string, unknown> }>
+      create: (ctx: unknown, payload: { data: unknown }) => Promise<Record<string, unknown>>
+      getList?: (ctx: unknown) => { $$state?: { value?: unknown[] } }
+    }
+    let svc: TrigSvc | null = null
+    for (const n of ['triggerService', 'serverTriggerService']) {
+      try { const s = inj.get<TrigSvc>(n); if (s && typeof s.create === 'function') { svc = s; break } } catch { /* try next */ }
+    }
+    if (!svc) return { ok: false }
+    let ctx: unknown
+    try { ctx = inj.get<{ getContext?: () => unknown }>('appStateService')?.getContext?.() } catch { /* ignore */ }
+
+    const list = svc.getList?.(ctx)?.$$state?.value ?? []
+
+    // Scan list: find CE template (typeDisplayName === 'Custom Event', stored in English
+    // internally regardless of UI locale — confirmed by server returning English typeDisplayName),
+    // collect names and workspace IDs.
+    let templateKey: unknown = null
+    let ceType: number | null = null
+    const wsFields: Record<string, unknown> = {}
+    for (const e of list) {
+      const entry = ((e as Record<string, unknown>)['trigger'] ?? e) as Record<string, unknown>
+      const d = entry['data'] as Record<string, unknown> | undefined
+      if (d?.['name'] != null) existingTriggers.set(String(d['name']), { key: entry['key'], type: d['type'] })
+      // Custom Event triggers are identified by typeDisplayName (English, locale-invariant)
+      if (d?.['typeDisplayName'] === 'Custom Event' && templateKey == null) {
+        templateKey = entry['key']
+        ceType = d['type'] as number
+      }
+      if (Object.keys(wsFields).length === 0) {
+        for (const k of ['accountId', 'containerId', 'workspaceId']) {
+          if (d?.[k] != null) wsFields[k] = d[k]
+        }
+      }
+    }
+    // Fallback CE type if no CE trigger exists in workspace yet.
+    // GTM Angular internal type integers: JS Error = 9 (confirmed). Custom Event = 4.
+    CE_TYPE = ceType ?? 4
+    console.log('[LayerLens] trigger: ceType discovered:', ceType, '→ using:', CE_TYPE, 'templateKey found:', templateKey != null)
+
+    // Reuse an existing CE trigger with the same name (correct CE type only)
+    const existing = existingTriggers.get(p.name)
+    if (existing != null) {
+      if (existing.type === CE_TYPE) {
+        const existingTriggerId = (existing.key as Record<string, unknown> | undefined)?.['triggerId'] as number | undefined
+        console.log('[LayerLens] trigger: reusing existing CE trigger, id:', existingTriggerId)
+        return { ok: true, created: false, triggerId: existingTriggerId }
+      }
+      console.log('[LayerLens] trigger: found existing with wrong type:', existing.type, '(CE_TYPE=', CE_TYPE, ') — will create new but name conflicts; user should delete old trigger')
+    }
+
+    // GTM Angular internal condition format (from GTM compiled source):
+    //   operator (string) + type (integer) + arg (value-object array)
+    // newMacroReference("_event") = { type: 4, macroReference: "_event" }
+    // newString(value) = { type: 1, string: value }
+    const OPERATOR_TO_INT: Record<string, number> = { EQUALS: 1, CONTAINS: 4, REGEX: 0 }
+    const operator = p.matchType === 'MATCH_REGEX' ? 'REGEX' : p.matchType
+    const condition = {
+      operator,
+      type: OPERATOR_TO_INT[operator] ?? 1,
+      arg: [
+        { type: 4, macroReference: '_event' },
+        { type: 1, string: p.eventName },
+      ],
+    }
+
+    let data: Record<string, unknown>
+    if (templateKey != null) {
+      const fetched = await svc.get(templateKey)
+      data = JSON.parse(JSON.stringify(fetched.data)) as Record<string, unknown>
+      for (const k of TRIG_TYPE_FIELDS) delete data[k]
+      delete data['parentFolderId']
+      data['name'] = p.name
+      data['type'] = CE_TYPE
+      data['customEventFilter'] = [condition]
+    } else {
+      data = { ...wsFields, name: p.name, type: CE_TYPE, customEventFilter: [condition] }
+    }
+
+    console.log('[LayerLens] trigger create data:', JSON.stringify(data))
+    const result = await svc.create(ctx, { data })
+    console.log('[LayerLens] trigger create result:', JSON.stringify(result))
+    // TriggerService.create resolves with the entity model: { key: { triggerId: N }, data: {...} }
+    const triggerId = ((result?.['key'] as Record<string, unknown> | undefined)?.['triggerId']
+      ?? (result?.['data'] as Record<string, unknown> | undefined)?.['triggerId']
+      ?? result?.['triggerId']) as number | undefined
+    return { ok: true, created: true, triggerId }
+  } catch (err) {
+    // 400 likely = duplicate name (errorCode 3): trigger was created in a previous run
+    // but may not have been in the list snapshot yet. Try to return its ID from the list.
+    const httpStatus = (err as Record<string, unknown> | undefined)?.['status']
+    if (typeof httpStatus === 'number' && httpStatus >= 400) {
+      const existing = existingTriggers.get(p.name)
+      if (existing?.type === CE_TYPE) {
+        const existingTriggerId = (existing.key as Record<string, unknown> | undefined)?.['triggerId'] as number | undefined
+        console.log('[LayerLens] trigger: 400 on create, reusing existing from list, id:', existingTriggerId)
+        return { ok: true, created: false, triggerId: existingTriggerId }
+      }
+    }
+    console.warn('[LayerLens] createCustomEventTrigger error', err)
+    return { ok: false }
+  }
+}
+
+// Fields specific to a tag type — stripped when converting a base tag to GA4 Event
+const TAG_TYPE_FIELDS = ['parameter', 'vendorTemplate', 'tagId', 'fingerprint',
+  'firingTriggerId', 'blockingTriggerId', 'setupTag', 'teardownTag',
+  'monitoringMetadata', 'monitoringMetadataTagNameKey']
+
+async function createGA4EventTag(p: {
+  name: string; eventName: string
+  triggerIds: number[]
+  eventParams: Array<{ name: string; value: string }>
+}): Promise<{ ok: boolean; created?: boolean }> {
+  try {
+    const inj = window.angular?.element(document.body).injector()
+    if (!inj) return { ok: false }
+    type TagSvc = {
+      get: (k: unknown) => Promise<{ data: Record<string, unknown> }>
+      create: (ctx: unknown, payload: { data: unknown }) => Promise<unknown>
+      getList?: (ctx: unknown) => { $$state?: { value?: unknown[] } }
+    }
+    let svc: TagSvc | null = null
+    for (const n of ['tagService', 'serverTagService', 'sTagService']) {
+      try { const s = inj.get<TagSvc>(n); if (s && typeof s.create === 'function') { svc = s; break } } catch { /* try next */ }
+    }
+    if (!svc) return { ok: false }
+    let ctx: unknown
+    try { ctx = inj.get<{ getContext?: () => unknown }>('appStateService')?.getContext?.() } catch { /* ignore */ }
+
+    const list = svc.getList?.(ctx)?.$$state?.value ?? []
+    // Prefer GA4 Event tag template; fall back to any tag for the structural shell
+    let templateKey: unknown = null
+    let isExactType = false
+    const existingTagNames = new Set<string>()
+    for (const e of list) {
+      const entry = ((e as Record<string, unknown>)['tag'] ?? e) as Record<string, unknown>
+      const d = entry['data'] as Record<string, unknown> | undefined
+      if (d?.['name'] != null) existingTagNames.add(String(d['name']))
+      const pid = ((d?.['vendorTemplate'] as Record<string, unknown> | undefined)?.['key'] as Record<string, unknown> | undefined)?.['publicId']
+      if (pid === 'gaawe' && !isExactType) { templateKey = entry['key']; isExactType = true }
+    }
+    if (!templateKey && list.length > 0) {
+      const entry = ((list[0] as Record<string, unknown>)['tag'] ?? list[0]) as Record<string, unknown>
+      templateKey = entry['key']
+    }
+
+    // Dedup: tag with same name already exists (e.g. from a previous successful run)
+    if (existingTagNames.has(p.name)) {
+      console.log('[LayerLens] tag: name already exists, skipping creation:', p.name)
+      return { ok: true, created: false }
+    }
+    console.log('[LayerLens] tag: isExactType:', isExactType, 'templateKey found:', templateKey != null)
+
+    let data: Record<string, unknown>
+    if (isExactType && templateKey != null) {
+      // Copy-row pattern (same as copyRowToNew): get full data, clone it, change only
+      // what we need — do NOT strip tagId/fingerprint/vendorTemplate, the server handles them
+      const fetched = await svc.get(templateKey)
+      data = JSON.parse(JSON.stringify(fetched.data)) as Record<string, unknown>
+    } else if (templateKey != null) {
+      // Non-gaawe shell: strip type-specific fields, rebuild vendorTemplate and params
+      const fetched = await svc.get(templateKey)
+      data = JSON.parse(JSON.stringify(fetched.data)) as Record<string, unknown>
+      for (const k of TAG_TYPE_FIELDS) delete data[k]
+      data['type'] = 46            // vendor template tag type in Angular model
+      data['tagFiringOption'] = 1  // oncePerEvent as Angular integer
+      data['vendorTemplate'] = { key: { publicId: 'gaawe' } }
+      data['parameter'] = []
+    } else {
+      // From scratch: type 46 = vendor template tag, tagFiringOption 1 = oncePerEvent
+      data = { type: 46, tagFiringOption: 1, vendorTemplate: { key: { publicId: 'gaawe' } }, parameter: [] }
+    }
+
+    data['name'] = p.name
+    // GTM Angular model uses positiveTriggerId/negativeTriggerId (integer arrays), not
+    // firingTriggerId/blockingTriggerId (REST API string arrays). Clear both formats.
+    delete data['firingTriggerId']
+    delete data['blockingTriggerId']
+    delete data['positiveTriggerId']
+    delete data['negativeTriggerId']
+    delete data['positiveConditionId']
+    delete data['negativeConditionId']
+
+    // For gaawe (vendor template) tags, the actual config lives in vendorTemplate.param
+    // (Angular internal value-object format), NOT in the root parameter array.
+    // GTM ignores the root parameter array for display and tag firing.
+    const angStr = (s: string) => ({
+      type: 1, string: s, listItem: [] as unknown[], mapKey: [] as unknown[],
+      mapValue: [] as unknown[], templateToken: [] as unknown[], escaping: [] as unknown[],
+    })
+    const vt = data['vendorTemplate'] as Record<string, unknown> | undefined
+    const vtParam: Array<Record<string, unknown>> = Array.isArray(vt?.['param'])
+      ? (vt!['param'] as Array<Record<string, unknown>>)
+      : []
+    if (vt && !Array.isArray(vt['param'])) vt['param'] = vtParam
+
+    // Set event name in vendorTemplate.param
+    const vtEn = vtParam.find((x) => x['key'] === 'eventName')
+    if (vtEn) vtEn['value'] = angStr(p.eventName)
+    else vtParam.push({ key: 'eventName', value: angStr(p.eventName) })
+
+    // Set event parameters as eventSettingsTable in vendorTemplate.param
+    const newListItems = p.eventParams.map((ep) => ({
+      type: 3, listItem: [] as unknown[], templateToken: [] as unknown[], escaping: [] as unknown[],
+      mapKey: [angStr('parameter'), angStr('parameterValue')],
+      mapValue: [angStr(ep.name), angStr(ep.value)],
+    }))
+    const newEst = { type: 2, listItem: newListItems, mapKey: [] as unknown[], mapValue: [] as unknown[], templateToken: [] as unknown[], escaping: [] as unknown[] }
+    const vtEst = vtParam.find((x) => x['key'] === 'eventSettingsTable')
+    if (vtEst) vtEst['value'] = newEst
+    else if (p.eventParams.length > 0) vtParam.push({ key: 'eventSettingsTable', value: newEst })
+
+    // Use positiveTriggerId (Angular model integer array) — firingTriggerId is the REST format
+    if (p.triggerIds.length > 0) data['positiveTriggerId'] = p.triggerIds
+
+    console.log('[LayerLens] createGA4EventTag full payload:', JSON.stringify(data))
+    await svc.create(ctx, { data })
+    return { ok: true, created: true }
+  } catch (err) {
+    // TagService.create calls handleTaggingActivityChange in .then(), which accesses
+    // tag.additionalChangeItems.some() — this throws a TypeError when the server
+    // response omits that field. The HTTP POST itself succeeded, so treat non-HTTP
+    // errors as success.
+    const httpStatus = (err as Record<string, unknown> | undefined)?.['status']
+    if (typeof httpStatus === 'number' && httpStatus >= 400) {
+      console.warn('[LayerLens] createGA4EventTag HTTP error:', httpStatus, JSON.stringify((err as Record<string, unknown>)?.['data']))
+      return { ok: false }
+    }
+    // Non-HTTP error (TypeError from post-create callback) — HTTP POST likely succeeded
+    console.log('[LayerLens] createGA4EventTag non-HTTP error (likely success):', (err as Error)?.message)
+    return { ok: true, created: true }
+  }
+}
+
+function showDlvFromPushModal() {
+  document.getElementById('amd-dlv-modal')?.remove()
+
+  const overlay = document.createElement('div')
+  overlay.className = 'amd-modal-overlay'
+  overlay.id = 'amd-dlv-modal'
+
+  const panel = document.createElement('div')
+  panel.className = 'amd-modal'
+  panel.style.cssText = 'width:min(720px,94vw);max-height:90vh;display:flex;flex-direction:column;'
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  const head = document.createElement('div')
+  head.className = 'amd-modal-head'
+  const titleEl = document.createElement('h3')
+  titleEl.textContent = 'Da push dataLayer'
+  const closeBtn = document.createElement('button')
+  closeBtn.type = 'button'; closeBtn.className = 'amd-modal-close'; closeBtn.title = 'Chiudi'; closeBtn.textContent = '×'
+  head.append(titleEl, closeBtn)
+
+  // ── Textarea ─────────────────────────────────────────────────────────────────
+  const textareaWrap = document.createElement('div')
+  textareaWrap.style.paddingBottom = '10px'
+  const textarea = document.createElement('textarea')
+  textarea.className = 'amd-dlv-textarea'
+  textarea.placeholder = 'dataLayer.push({ event: "...", ecommerce: { ... } })'
+  const errorEl = document.createElement('div')
+  errorEl.className = 'amd-dlv-error'
+  textareaWrap.append(textarea, errorEl)
+
+  // ── Sections wrapper (scrollable) ────────────────────────────────────────────
+  const sectionsWrap = document.createElement('div')
+  sectionsWrap.style.cssText = 'flex:1;overflow-y:auto;padding:2px 0 6px;'
+
+  // ── Section builder ──────────────────────────────────────────────────────────
+  function makeSection(title: string, enabledByDefault: boolean, openByDefault: boolean) {
+    const sec = document.createElement('div')
+    sec.className = 'amd-dlv-section' + (openByDefault ? ' open' : '')
+
+    const secHead = document.createElement('div')
+    secHead.className = 'amd-dlv-section-head'
+
+    const toggle = document.createElement('input')
+    toggle.type = 'checkbox'; toggle.className = 'amd-dlv-section-toggle'; toggle.checked = enabledByDefault
+    toggle.addEventListener('click', (e) => e.stopPropagation())
+    toggle.addEventListener('change', () => sec.classList.toggle('amd-dlv-section-disabled', !toggle.checked))
+
+    const titleSpan = document.createElement('span')
+    titleSpan.className = 'amd-dlv-section-title'; titleSpan.textContent = title
+
+    const badge = document.createElement('span')
+    badge.className = 'amd-dlv-section-badge'; badge.style.display = 'none'
+
+    const arrow = document.createElement('span')
+    arrow.className = 'amd-dlv-section-arrow'; arrow.textContent = '▼'
+
+    secHead.append(toggle, titleSpan, badge, arrow)
+    secHead.addEventListener('click', (e) => { if (e.target === toggle) return; sec.classList.toggle('open') })
+
+    const body = document.createElement('div')
+    body.className = 'amd-dlv-section-body'
+    sec.append(secHead, body)
+    if (!enabledByDefault) sec.classList.add('amd-dlv-section-disabled')
+
+    return {
+      el: sec, body, toggle,
+      isEnabled: () => toggle.checked,
+      setBadge(text: string, warn = false) {
+        badge.textContent = text; badge.style.display = text ? '' : 'none'
+        badge.className = 'amd-dlv-section-badge' + (warn ? ' warn' : '')
+      },
+    }
+  }
+
+  // ── Section: Variabili ───────────────────────────────────────────────────────
+  const varSec = makeSection('Variabili livello dati', true, true)
+
+  const varListHead = document.createElement('div')
+  varListHead.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;'
+  const varListLabel = document.createElement('div')
+  varListLabel.className = 'amd-dlv-sublabel'; varListLabel.style.marginBottom = '0'; varListLabel.textContent = 'Percorsi estratti:'
+  const varSelectAll = document.createElement('button')
+  varSelectAll.type = 'button'; varSelectAll.className = 'amd-dlv-selectall'; varSelectAll.textContent = 'Deseleziona tutti'
+  varListHead.append(varListLabel, varSelectAll)
+
+  const varListEl = document.createElement('div')
+  varListEl.className = 'amd-dlv-list'
+  const varEmptyEl = document.createElement('div')
+  varEmptyEl.className = 'amd-dlv-empty'; varEmptyEl.textContent = 'Incolla un push per visualizzare i percorsi.'
+  varListEl.appendChild(varEmptyEl)
+  varSec.body.append(varListHead, varListEl)
+
+  type VarEntry = { path: string; nameInput: HTMLInputElement; checkbox: HTMLInputElement }
+  let varEntries: VarEntry[] = []
+  let allVarsSelected = true
+
+  // updateCreateBtn declared early, assigned after all sections exist
+  let updateCreateBtn: () => void = () => {}
+
+  const updateVarSection = () => {
+    const n = varEntries.filter((e) => e.checkbox.checked).length
+    varSec.setBadge(varEntries.length > 0 ? String(n) : '')
+    updateCreateBtn()
+  }
+
+  const renderVarPaths = (paths: string[]) => {
+    varListEl.innerHTML = ''; varEntries = []; allVarsSelected = true
+    varSelectAll.textContent = 'Deseleziona tutti'
+    if (paths.length === 0) {
+      const msg = document.createElement('div'); msg.className = 'amd-dlv-empty'; msg.textContent = 'Nessun percorso trovato.'
+      varListEl.appendChild(msg); updateVarSection(); return
+    }
+    for (const path of paths) {
+      const item = document.createElement('div'); item.className = 'amd-dlv-item'
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true
+      cb.addEventListener('change', updateVarSection)
+      const code = document.createElement('code'); code.textContent = path
+      const ni = document.createElement('input'); ni.type = 'text'; ni.value = `dlv - ${path}`
+      item.append(cb, code, ni); varListEl.appendChild(item)
+      varEntries.push({ path, nameInput: ni, checkbox: cb })
+    }
+    updateVarSection()
+  }
+
+  varSelectAll.addEventListener('click', () => {
+    allVarsSelected = !allVarsSelected
+    varEntries.forEach((e) => { e.checkbox.checked = allVarsSelected })
+    varSelectAll.textContent = allVarsSelected ? 'Deseleziona tutti' : 'Seleziona tutti'
+    updateVarSection()
+  })
+
+  // ── Section: Trigger ─────────────────────────────────────────────────────────
+  const trigSec = makeSection('Trigger evento personalizzato', true, true)
+
+  const trigNameField = document.createElement('div'); trigNameField.className = 'amd-dlv-field'
+  const trigNameLabel = document.createElement('label'); trigNameLabel.textContent = 'Nome trigger:'
+  const trigNameInput = document.createElement('input'); trigNameInput.type = 'text'; trigNameInput.placeholder = 'nome_evento'
+  trigNameField.append(trigNameLabel, trigNameInput)
+
+  const trigMatchField = document.createElement('div'); trigMatchField.className = 'amd-dlv-field'
+  const trigMatchLabel = document.createElement('label'); trigMatchLabel.textContent = 'Tipo di corrispondenza:'
+  const trigRadioWrap = document.createElement('div'); trigRadioWrap.className = 'amd-dlv-radios'
+  const matchTypes: Array<['EQUALS' | 'CONTAINS' | 'MATCH_REGEX', string]> = [['EQUALS', 'Uguale a'], ['CONTAINS', 'Contiene'], ['MATCH_REGEX', 'Regex']]
+  const matchRadios: HTMLInputElement[] = []
+  for (const [val, label] of matchTypes) {
+    const r = document.createElement('input'); r.type = 'radio'; r.name = 'amd-dlv-match'; r.value = val; if (val === 'EQUALS') r.checked = true
+    const lEl = document.createElement('label'); lEl.append(r, document.createTextNode(' ' + label))
+    trigRadioWrap.appendChild(lEl); matchRadios.push(r)
+  }
+  trigMatchField.append(trigMatchLabel, trigRadioWrap)
+  trigSec.body.append(trigNameField, trigMatchField)
+  trigNameInput.addEventListener('input', () => updateCreateBtn())
+
+  // ── Section: Tag GA4 Event ───────────────────────────────────────────────────
+  const ga4Sec = makeSection('Tag GA4 Event', false, false)
+
+  const ga4NameField = document.createElement('div'); ga4NameField.className = 'amd-dlv-field'
+  const ga4NameLabel = document.createElement('label'); ga4NameLabel.textContent = 'Nome tag:'
+  const ga4NameInput = document.createElement('input'); ga4NameInput.type = 'text'; ga4NameInput.placeholder = 'GA4 - Event - nome_evento'
+  ga4NameField.append(ga4NameLabel, ga4NameInput)
+
+  const ga4EventField = document.createElement('div'); ga4EventField.className = 'amd-dlv-field'
+  const ga4EventLabel = document.createElement('label'); ga4EventLabel.textContent = 'Nome evento GA4:'
+  const ga4EventInput = document.createElement('input'); ga4EventInput.type = 'text'
+  ga4EventField.append(ga4EventLabel, ga4EventInput)
+
+  const ga4TrigField = document.createElement('div'); ga4TrigField.className = 'amd-dlv-field'
+  const ga4TrigLabel = document.createElement('label')
+  ga4TrigLabel.style.cssText = 'display:flex;align-items:center;gap:7px;cursor:pointer;font-weight:400!important;'
+  const ga4TrigCb = document.createElement('input'); ga4TrigCb.type = 'checkbox'; ga4TrigCb.checked = true
+  ga4TrigLabel.append(ga4TrigCb, document.createTextNode('Usa il trigger creato sopra come firing trigger'))
+  ga4TrigField.appendChild(ga4TrigLabel)
+
+  const ga4Note = document.createElement('div'); ga4Note.className = 'amd-dlv-note'
+  ga4Note.textContent = 'I parametri evento verranno aggiunti automaticamente dalle variabili selezionate.'
+
+  ga4Sec.body.append(ga4NameField, ga4EventField, ga4TrigField, ga4Note)
+  ga4NameInput.addEventListener('input', () => updateCreateBtn())
+
+  sectionsWrap.append(varSec.el, trigSec.el, ga4Sec.el)
+
+  // ── Actions ──────────────────────────────────────────────────────────────────
+  const actionsEl = document.createElement('div'); actionsEl.className = 'amd-modal-actions'
+  const statusEl = document.createElement('span'); statusEl.className = 'amd-modal-msg'
+  const createBtn = document.createElement('button')
+  createBtn.type = 'button'; createBtn.className = 'amd-modal-save'; createBtn.textContent = 'Crea selezione'; createBtn.disabled = true
+  actionsEl.append(statusEl, createBtn)
+
+  panel.append(head, textareaWrap, sectionsWrap, actionsEl)
+  overlay.appendChild(panel)
+  document.body.appendChild(overlay)
+
+  const close = () => overlay.remove()
+  closeBtn.addEventListener('click', close)
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
+
+  // Assign real updateCreateBtn now that createBtn and inputs exist
+  updateCreateBtn = () => {
+    const varOk = varSec.isEnabled() && varEntries.filter((e) => e.checkbox.checked).length > 0
+    const trigOk = trigSec.isEnabled() && !!trigNameInput.value.trim()
+    const ga4Ok = ga4Sec.isEnabled() && !!ga4NameInput.value.trim()
+    createBtn.disabled = !varOk && !trigOk && !ga4Ok
+  }
+  varSec.toggle.addEventListener('change', updateCreateBtn)
+  trigSec.toggle.addEventListener('change', updateCreateBtn)
+  ga4Sec.toggle.addEventListener('change', updateCreateBtn)
+
+  // ── JSON parse ────────────────────────────────────────────────────────────────
+  let currentEvent = ''
+  let debounce: ReturnType<typeof setTimeout> | null = null
+  textarea.addEventListener('input', () => {
+    if (debounce) clearTimeout(debounce)
+    debounce = setTimeout(() => {
+      const raw = textarea.value.trim()
+      errorEl.textContent = ''
+      if (!raw) {
+        varListEl.innerHTML = ''; varListEl.appendChild(varEmptyEl); varEntries = []; currentEvent = ''
+        trigNameInput.value = ''; ga4EventInput.value = ''; ga4NameInput.value = ''
+        updateVarSection(); return
+      }
+      try {
+        const parsed = JSON.parse(preprocessJsPush(raw)) as Record<string, unknown>
+        currentEvent = typeof parsed['event'] === 'string' ? parsed['event'] : ''
+        renderVarPaths(parseDataLayerPaths(parsed))
+        // Auto-fill trigger and GA4 names (respects manual edits)
+        if (currentEvent) {
+          if (!trigNameInput.value || trigNameInput.value === currentEvent) trigNameInput.value = currentEvent
+          if (!ga4EventInput.value) ga4EventInput.value = currentEvent
+          if (!ga4NameInput.value || ga4NameInput.value.startsWith('GA4 - ')) ga4NameInput.value = `GA4 - Event - ${currentEvent}`
+        }
+        updateCreateBtn()
+      } catch {
+        errorEl.textContent = 'Sintassi non valida — controlla l\'oggetto push.'
+        varListEl.innerHTML = ''; varEntries = []; currentEvent = ''
+        updateVarSection()
+      }
+    }, 280)
+  })
+
+  // ── Create ────────────────────────────────────────────────────────────────────
+  createBtn.addEventListener('click', () => {
+    createBtn.disabled = true; statusEl.textContent = ''; statusEl.style.color = '#137333'
+
+    const steps: Array<() => Promise<string>> = []
+
+    if (varSec.isEnabled()) {
+      const toCreate = varEntries.filter((e) => e.checkbox.checked && e.nameInput.value.trim())
+      if (toCreate.length > 0) {
+        steps.push(async () => {
+          const { ok, fail, skipped } = await createDlvVariables(toCreate.map((e) => ({ path: e.path, name: e.nameInput.value.trim() })))
+          if (ok === 0 && fail > 0) throw new Error('Variabili: creazione fallita')
+          const parts = []
+          if (ok > 0) parts.push(`${ok} variabl${ok === 1 ? 'e' : 'i'} create`)
+          if (skipped > 0) parts.push(`${skipped} già esistenti`)
+          if (fail > 0) parts.push(`${fail} fallite`)
+          return parts.join(', ') || 'Nessuna variabile da creare'
+        })
+      }
+    }
+
+    let createdTriggerId: number | undefined
+    if (trigSec.isEnabled() && trigNameInput.value.trim()) {
+      const matchType = (matchRadios.find((r) => r.checked)?.value ?? 'EQUALS') as 'EQUALS' | 'CONTAINS' | 'MATCH_REGEX'
+      const evName = currentEvent || trigNameInput.value.trim()
+      steps.push(async () => {
+        const res = await createCustomEventTrigger({ name: trigNameInput.value.trim(), eventName: evName, matchType })
+        if (!res.ok) throw new Error('Trigger: creazione fallita')
+        createdTriggerId = res.triggerId
+        return res.created ? 'Trigger creato' : 'Trigger già esistente'
+      })
+    }
+
+    if (ga4Sec.isEnabled() && ga4NameInput.value.trim()) {
+      steps.push(async () => {
+        const eventParams: Array<{ name: string; value: string }> = []
+        if (varSec.isEnabled()) {
+          for (const e of varEntries) {
+            if (!e.checkbox.checked) continue
+            const segs = e.path.split('.')
+            eventParams.push({ name: segs[segs.length - 1], value: `{{${e.nameInput.value.trim()}}}` })
+          }
+        }
+        const trigIds = ga4TrigCb.checked && createdTriggerId != null ? [createdTriggerId] : []
+        const res = await createGA4EventTag({
+          name: ga4NameInput.value.trim(),
+          eventName: ga4EventInput.value.trim() || currentEvent,
+          triggerIds: trigIds,
+          eventParams,
+        })
+        if (!res.ok) throw new Error('Tag GA4: creazione fallita. Controlla la console per dettagli.')
+        return res.created ? 'Tag GA4 creato' : 'Tag GA4 già esistente'
+      })
+    }
+
+    void (async () => {
+      const results: string[] = []
+      try {
+        for (const step of steps) results.push(await step())
+        statusEl.textContent = results.join(' · ')
+        setTimeout(close, 1800)
+      } catch (err) {
+        statusEl.style.color = '#c5221f'
+        statusEl.textContent = err instanceof Error ? err.message : 'Errore durante la creazione'
+        createBtn.disabled = false
+      }
+    })()
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function showToast(msg: string) {
   document.querySelector('.amd-toast')?.remove()
   const toast = document.createElement('div')
@@ -1541,7 +2941,7 @@ let scheduled = false
 const observer = new MutationObserver((mutations) => {
   const ours = mutations.every((m) => {
     const t = m.target as HTMLElement
-    return t.closest?.(`#${TOOLBAR_ID}, #amd-label-editor, #andromeda-filters-style, #amd-table-actions, .amd-table-modal-overlay, .amd-toast`)
+    return t.closest?.(`#${TOOLBAR_ID}, #amd-label-editor, #andromeda-filters-style, #amd-table-actions, .amd-table-modal-overlay, .amd-toast, #amd-dlv-modal`)
   })
   if (ours || scheduled) return
   scheduled = true
@@ -1562,6 +2962,7 @@ declare global {
     __amdBulkBound?: boolean
     __amdDropdownBound?: boolean
     __amdTableKbBound?: boolean
+    __amdFolderScanned?: boolean
   }
 }
 window.QOL ??= {}
