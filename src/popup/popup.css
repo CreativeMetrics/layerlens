@@ -55,6 +55,7 @@ body {
 /* card */
 .card { padding: 13px 15px; border-bottom: 0.5px solid var(--border); }
 .row-between { display: flex; align-items: center; justify-content: space-between; }
+.row-actions { display: flex; align-items: center; gap: 6px; }
 .muted { color: var(--muted); }
 .small { font-size: 11px; line-height: 1.5; }
 .badge { font-size: 11px; font-weight: 600; background: var(--info-bg); color: var(--info-tx); padding: 2px 9px; border-radius: 20px; }

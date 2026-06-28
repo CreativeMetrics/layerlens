@@ -35,6 +35,7 @@ export interface GtmRowScope {
 /** Angular service ($$state holds the resolved list). */
 export interface GtmListService {
   getList?: (context: unknown) => { $$state?: { value?: GtmElementScope[] } }
+  delete?: (key: unknown) => Promise<unknown>
   $$state?: { value?: GtmElementScope[] }
 }
 
@@ -60,6 +61,10 @@ declare global {
     dataLayer?: unknown[]
     /** Variables injected by the content script for the page-world QoL bundle. */
     __QOL_VARS__?: Record<string, unknown>
+    /** Set after the first folder-page DOM scan so we don't repeat it. */
+    __amdFolderScanned?: boolean
+    __amdDropdownBound?: boolean
+    __amdSlashBound?: boolean
   }
 }
 

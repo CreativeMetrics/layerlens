@@ -3,9 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <title>LayerLens</title>
-    <script type="module" crossorigin src="/assets/index.html-D1r8kNK6.js"></script>
+    <script type="module" crossorigin src="/assets/index.html-BJM1vOzr.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/storage-DQyFDKmw.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-DumIAnPB.css">
+    <link rel="modulepreload" crossorigin href="/assets/consent-C5hJbv_N.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-DMyhiPNh.css">
   </head>
   <body>
     <main class="app">
@@ -30,7 +31,10 @@
         <section class="card">
           <div class="row-between">
             <span class="muted" id="dl-status">Ricerca container…</span>
-            <span class="badge" id="container-count" hidden>0</span>
+            <span class="row-actions">
+              <span class="badge" id="container-count" hidden>0</span>
+              <button id="gtm-export" class="icon-btn" title="Esporta GTM rilevato come JSON" aria-label="Esporta GTM rilevato" hidden><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M7 11l5 5l5-5"/><path d="M12 4v12"/></svg></button>
+            </span>
           </div>
           <div class="containers" id="containers"></div>
           <div class="no-gtm" id="no-gtm" hidden>
@@ -57,6 +61,22 @@
             <span class="toggle-txt">
               <span class="toggle-title">Blocca uscita accidentale</span>
               <span class="toggle-sub">Avvisa prima di lasciare la pagina</span>
+            </span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="dl_bg_capture" />
+            <span class="switch" aria-hidden="true"></span>
+            <span class="toggle-txt">
+              <span class="toggle-title">Monitoraggio avanzato per l'export</span>
+              <span class="toggle-sub">Registra i push dataLayer e l'origine delle richieste di rete (mostra il banner di debug di Chrome)</span>
+            </span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="multi_page_capture" />
+            <span class="switch" aria-hidden="true"></span>
+            <span class="toggle-txt">
+              <span class="toggle-title">Cattura multi-pagina</span>
+              <span class="toggle-sub">Accumula network e cookie su più pagine invece di azzerarli ad ogni navigazione, finché non chiudi il tab o disattivi il toggle</span>
             </span>
           </label>
         </section>

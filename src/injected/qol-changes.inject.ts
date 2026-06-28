@@ -11,6 +11,7 @@
 
 import {
   copyRowToNew,
+  deleteRow,
   getFolderMap,
   getRowElements,
   hasBuiltInVariables,
@@ -402,6 +403,7 @@ function injectStyleOnce() {
     :root {
       --amd-copy-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z'/%3E%3Cpath d='M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2'/%3E%3C/svg%3E");
       --amd-pause-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Crect x='6' y='4' width='4' height='16' rx='1'/%3E%3Crect x='14' y='4' width='4' height='16' rx='1'/%3E%3C/svg%3E");
+      --amd-delete-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7h16'/%3E%3Cpath d='M10 11v6'/%3E%3Cpath d='M14 11v6'/%3E%3Cpath d='M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12'/%3E%3Cpath d='M9 7V4h6v3'/%3E%3C/svg%3E");
       --amd-resume-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M8 5v14l11-7z'/%3E%3C/svg%3E");
     }
     .amd-icon-group {
@@ -464,6 +466,25 @@ function injectStyleOnce() {
     .amd-pause-element.amd-pause-ok::before { background-color: #137333 !important; }
     .amd-pause-element.amd-pause-err { background: #fce8e6 !important; opacity: 1; transition: none; }
     .amd-pause-element.amd-pause-err::before { background-color: #c5221f !important; }
+    .amd-delete-element {
+      appearance: none; border: none; padding: 0; outline: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      cursor: pointer; vertical-align: middle;
+      width: 30px; height: 30px; border-radius: 8px;
+      background: transparent; opacity: 0; transition: background .12s, opacity .12s;
+    }
+    [gtm-table-row]:hover .amd-delete-element,
+    tr:hover .amd-delete-element { opacity: 1; }
+    .amd-delete-element::before {
+      content: ''; width: 17px; height: 17px; display: block;
+      background-color: #5f6368; transition: background-color .12s;
+      -webkit-mask: var(--amd-delete-mask) center / contain no-repeat;
+      mask: var(--amd-delete-mask) center / contain no-repeat;
+    }
+    .amd-delete-element:hover { background: #fce8e6; opacity: 1; }
+    .amd-delete-element:hover::before { background-color: #c5221f; }
+    .amd-delete-element.amd-delete-err { background: #fce8e6 !important; opacity: 1; transition: none; }
+    .amd-delete-element.amd-delete-err::before { background-color: #c5221f !important; }
     .amd-type-icon {
       width: 20px; height: 20px; object-fit: contain; vertical-align: middle;
       margin-right: 9px; border-radius: 4px; flex-shrink: 0;
@@ -537,14 +558,14 @@ function injectStyleOnce() {
     #${TOOLBAR_ID} .amd-rename-active {
       background: #e5c614; border-color: #c9ad07; color: #2c2c2a; font-weight: 600;
     }
-    /* ── Lookup/RegEx table copy-paste ──────────── */
-    #amd-table-actions { display: flex; gap: 8px; padding: 6px 0 10px; }
-    #amd-table-actions button {
+    /* ── Lookup/RegEx table copy-paste (one per simple-table on the page) ── */
+    .amd-table-actions { display: flex; gap: 8px; padding: 6px 0 10px; }
+    .amd-table-actions button {
       padding: 5px 12px; border: 1px solid rgba(0,0,0,.14); border-radius: 8px;
       background: #fff; color: #3c4043; font-size: 13px; cursor: pointer;
       transition: background .12s, border-color .12s;
     }
-    #amd-table-actions button:hover { background: #faf6da; border-color: #e5c614; }
+    .amd-table-actions button:hover { background: #faf6da; border-color: #e5c614; }
     /* ── Toast ──────────────────────────────────── */
     .amd-toast {
       position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
@@ -842,6 +863,53 @@ function addPauseIcons(rows: GtmRow[]) {
     const nativePauseBadge = lastCell.querySelector<HTMLElement>('.pause-circle-filled-icon')
     if (nativePauseBadge) nativePauseBadge.style.display = isPaused ? 'none' : ''
   }
+}
+
+function addDeleteIcons(rows: GtmRow[]) {
+  if (currentPage === '' || currentPage === 'FOLDERS') return
+  for (const r of rows) {
+    const tr =
+      (r.node.matches('tr') ? r.node : r.node.querySelector<HTMLElement>('tr')) ?? r.node
+    const lastCell =
+      tr.querySelector<HTMLElement>(':scope > td:last-child') ??
+      tr.querySelector<HTMLElement>('td:last-child')
+    if (!lastCell) continue
+    if (lastCell.querySelector('.amd-delete-element')) continue
+    let group = lastCell.querySelector<HTMLElement>('.amd-icon-group')
+    if (!group) {
+      group = document.createElement('span')
+      group.className = 'amd-icon-group'
+      lastCell.appendChild(group)
+    }
+    const icon = document.createElement('button')
+    icon.className = 'amd-delete-element qol-row-not-clickable'
+    icon.title = 'Elimina'
+    icon.type = 'button'
+    icon.addEventListener(
+      'click',
+      (ev) => {
+        ev.preventDefault()
+        ev.stopPropagation()
+        // GTM's native menu will show its own confirm dialog and handles dependency
+        // errors (e.g. trigger in use by tags). No window.confirm here.
+        deleteRow(currentPage as Exclude<PageType, '' | 'FOLDERS'>, icon, (ok) => {
+          if (!ok) {
+            icon.classList.add('amd-delete-err')
+            setTimeout(() => icon.classList.remove('amd-delete-err'), 1200)
+          }
+        })
+      },
+      true,
+    )
+    group.appendChild(icon)
+  }
+}
+
+function isServerContainer(): boolean {
+  // Angular service probing is unreliable: clientService has getList on both web and sGTM;
+  // serverVariableService is not injectable on either. Use DOM instead:
+  // sGTM navigation always renders a Clients page link (via ng-if); web containers never do.
+  return document.querySelector('a[href*="/clients"]') != null
 }
 
 function renderToolbar(rows: GtmRow[]) {
@@ -1259,13 +1327,23 @@ function renderToolbar(rows: GtmRow[]) {
       editBtn.addEventListener('click', () => openLabelEditor())
       bar!.appendChild(editBtn)
 
-      const dlvBtn = document.createElement('button')
-      dlvBtn.type = 'button'
-      dlvBtn.className = 'amd-builtin-toggle'
-      dlvBtn.textContent = 'Da push datalayer…'
-      dlvBtn.title = 'Crea variabili "Variabile livello dati" da un push JSON'
-      dlvBtn.addEventListener('click', () => showDlvFromPushModal())
-      bar!.appendChild(dlvBtn)
+      if (!isServerContainer()) {
+        const dlvBtn = document.createElement('button')
+        dlvBtn.type = 'button'
+        dlvBtn.className = 'amd-builtin-toggle'
+        dlvBtn.textContent = 'Da push datalayer…'
+        dlvBtn.title = 'Crea variabili "Variabile livello dati" da un push JSON'
+        dlvBtn.addEventListener('click', () => showDlvFromPushModal())
+        bar!.appendChild(dlvBtn)
+      } else {
+        const edvBtn = document.createElement('button')
+        edvBtn.type = 'button'
+        edvBtn.className = 'amd-builtin-toggle'
+        edvBtn.textContent = 'Da evento server…'
+        edvBtn.title = 'Crea variabili Event Data da un evento GA4 server (incolla il JSON da Tag Assistant)'
+        edvBtn.addEventListener('click', () => showEventDataWizardModal())
+        bar!.appendChild(edvBtn)
+      }
     }
 
     updateVisibleCount(getRowElements(currentPage as Exclude<PageType, '' | 'FOLDERS'>))
@@ -1771,6 +1849,7 @@ function sync(rebuild = false) {
   addFolderBadges(rows)
   addCopyIcons(rows)
   addPauseIcons(rows)
+  addDeleteIcons(rows)
   initBulkSelection()
   injectTableCopyPasteButtons()
 }
@@ -1869,40 +1948,106 @@ function confirmRenames() {
 
 type TableListItem = { mapValue: Array<{ string: string }> }
 
-function getTableAddRowBtn(): HTMLElement | null {
-  return document.querySelector<HTMLElement>('[data-ng-click="ctrl.addRow()"]')
+/** Returns `rec.listItem` or `rec.value.listItem`, whichever is an array. */
+function listItemFrom(rec: Record<string, unknown> | undefined): TableListItem[] | null {
+  if (!rec) return null
+  if (Array.isArray(rec['listItem'])) return rec['listItem'] as TableListItem[]
+  const value = rec['value'] as Record<string, unknown> | undefined
+  if (value && Array.isArray(value['listItem'])) return value['listItem'] as TableListItem[]
+  return null
 }
 
-/** Walks ctrl.instance.paramMap.map.value.listItem and returns the live array
- *  if found. maxDepth controls how many parent scopes to try. */
-function tryExtractTable(
+/** Walks up parent scopes looking for `ctrl.instance` and collecting every listItem
+ *  array reachable from it. Two shapes are tried, since GTM uses the same simple-table
+ *  component in two different bindings:
+ *  1. Field-level (`instance` IS the LIST parameter, or wraps it via `.value`) — used
+ *     by vendor-template tag parameters like the GA4 Event tag's Event Settings and
+ *     the GA4 Configuration tag's Fields to Set / User Properties / Configuration Settings.
+ *  2. Entity-level (`instance` is the whole entity, the table is one of its named
+ *     parameters under `instance.paramMap[<key>]`) — used by Lookup/RegEx Table
+ *     variables (fixed key `"map"`) and by tags with several simple-tables on one
+ *     screen (e.g. the GA4 Event tag's Event Parameters / User Properties / Advanced
+ *     Settings), where each table lives under its own key.
+ *  IMPORTANT: every key in `paramMap` is collected, not just the first one that looks
+ *  like a list — GTM's internal Param model puts a `listItem` field on every parameter
+ *  generically (populated only when that param is actually LIST-typed, empty/`[]`
+ *  otherwise), so a boolean/string param earlier in iteration order (e.g.
+ *  `sendEcommerceData`) can "look like" an empty table and would wrongly win if this
+ *  stopped at the first match — that was silently making "Copia tabella" find the
+ *  wrong (always-empty) param on every screen with more than one named table.
+ *  Callers disambiguate among the collected results by visible DOM row count.
+ *  maxDepth controls how many parent scopes to try. */
+function tryExtractAllTables(
   scope: Record<string, unknown> | undefined,
   maxDepth = 6,
-): TableListItem[] | null {
+): TableListItem[][] {
+  const results: TableListItem[][] = []
   let s: Record<string, unknown> | undefined = scope
   for (let i = 0; i < maxDepth && s; i++) {
     try {
       const ctrl = (s['ctrl'] ?? s['$ctrl']) as Record<string, unknown> | undefined
       if (ctrl && typeof ctrl === 'object') {
         const instance = ctrl['instance'] as Record<string, unknown> | undefined
-        const paramMap = instance?.['paramMap'] as Record<string, unknown> | undefined
-        const map = paramMap?.['map'] as Record<string, unknown> | undefined
-        const value = map?.['value'] as Record<string, unknown> | undefined
-        const listItem = value?.['listItem']
-        if (Array.isArray(listItem)) return listItem as TableListItem[]
+        if (instance) {
+          const direct = listItemFrom(instance)
+          if (direct) results.push(direct)
+
+          const paramMap = instance['paramMap'] as Record<string, unknown> | undefined
+          if (paramMap && typeof paramMap === 'object') {
+            for (const param of Object.values(paramMap)) {
+              const found = listItemFrom(param as Record<string, unknown> | undefined)
+              if (found) results.push(found)
+            }
+          }
+        }
       }
     } catch { /* ignore */ }
     s = s['$parent'] as Record<string, unknown> | undefined
   }
-  return null
+  return results
+}
+
+/** Picks, among several candidate listItem arrays, the one whose length matches the
+ *  rows actually visible in the DOM for this specific table. Confirmed via debug on a
+ *  real GA4 Event tag: the vendor-template simple-table widget (`vt-st-add` button)
+ *  renders one extra "add new row" placeholder element in the DOM beyond the committed
+ *  listItem entries — a table with 5 real rows shows domRowCount=6, an empty one shows
+ *  domRowCount=1 with 0 items — so `domRowCount - 1` is just as valid a match as an
+ *  exact one. When several candidates qualify (e.g. several genuinely-empty params all
+ *  matching `domRowCount - 1 === 0`), the longest wins: spurious matches from non-LIST
+ *  params are always empty by construction, so a non-zero length is always the real table.
+ *  Returns null when there's no match at all (caller decides the fallback). */
+function pickByRowCount(lists: TableListItem[][], domRowCount: number): TableListItem[] | null {
+  const candidates = lists.filter(
+    (items) => items.length === domRowCount || items.length === domRowCount - 1,
+  )
+  if (candidates.length === 0) return null
+  return candidates.reduce((best, cur) => (cur.length > best.length ? cur : best))
+}
+
+/** The DOM section wrapping one specific table (its rows + add-row button) —
+ *  used to scope every row query/click to THAT table instead of the whole page,
+ *  since a single screen can have several simple-tables at once (e.g. the GA4
+ *  Configuration tag's "Fields to Set"/"User Properties"/"Configuration Settings",
+ *  or the GA4 Event tag's "Event Settings"). */
+function tableSectionFor(btn: HTMLElement): HTMLElement | null {
+  return (
+    btn.closest<HTMLElement>('.blg-form-input') ??
+    btn.closest<HTMLElement>('[diff-field]') ??
+    btn.parentElement
+  )
+}
+
+function rowsIn(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('.simple-table-row'))
 }
 
 /** After modifying listItem directly, trigger Angular's update cycle by clicking
  *  the DOM add-row button (which runs inside Zone.js, properly scheduling a $digest).
  *  addRow() appends one empty item — we pop it immediately so only our data remains. */
-/** Click the delete button of the last visible simple-table row. */
-function clickDeleteLastRow() {
-  const rows = document.querySelectorAll<HTMLElement>('.simple-table-row')
+/** Click the delete button of the last visible simple-table row within `container`. */
+function clickDeleteLastRow(container: HTMLElement) {
+  const rows = rowsIn(container)
   const lastRow = rows[rows.length - 1]
   if (!lastRow) return
   const btn =
@@ -1911,11 +2056,11 @@ function clickDeleteLastRow() {
   btn?.click()
 }
 
-/** Delete all existing rows by clicking their delete buttons. */
-function clickDeleteAllRows() {
+/** Delete all existing rows within `container` by clicking their delete buttons. */
+function clickDeleteAllRows(container: HTMLElement) {
   let safety = 200
   while (safety-- > 0) {
-    const rows = document.querySelectorAll<HTMLElement>('.simple-table-row')
+    const rows = rowsIn(container)
     if (rows.length === 0) break
     const lastRow = rows[rows.length - 1]
     const btn =
@@ -1929,12 +2074,10 @@ function clickDeleteAllRows() {
 /** Paste rows by clicking addRow for each entry, then reading the fresh listItem
  *  reference and writing values on the newly added row — same pattern as Andromeda's
  *  ctrl.addRow() + immediate set, but via DOM clicks to avoid the tableHelper issue. */
-function pasteRowsByClick(rowsData: Array<[string, string]>) {
-  const addRowBtn = getTableAddRowBtn()
-  if (!addRowBtn) return
+function pasteRowsByClick(container: HTMLElement, addRowBtn: HTMLElement, rowsData: Array<[string, string]>) {
   for (const [key, val] of rowsData) {
     addRowBtn.click()
-    const currentItems = getTableListItemArray()
+    const currentItems = getTableListItemArray(container, addRowBtn)
     if (!currentItems || currentItems.length === 0) break
     const last = currentItems[currentItems.length - 1]
     if (last?.mapValue?.[0] != null) last.mapValue[0].string = key
@@ -1942,41 +2085,53 @@ function pasteRowsByClick(rowsData: Array<[string, string]>) {
   }
   // Final addRow + deleteRow forces a digest that commits the last row's values
   addRowBtn.click()
-  clickDeleteLastRow()
+  clickDeleteLastRow(container)
 }
 
-/** Candidate DOM elements whose Angular scope might carry the table ctrl.
- *  Exported for diagnostic logging. */
-function tableScopeCandidates(): Element[] {
-  const btn = getTableAddRowBtn()
-  if (!btn) return []
+/** Candidate DOM elements whose Angular scope might carry the table ctrl for
+ *  this specific `btn`/`container` pair (not just "the" table on the page). */
+function tableScopeCandidates(btn: HTMLElement, container: HTMLElement): Element[] {
   return [
     btn,
     btn.parentElement,
     btn.closest('.blg-form-input'),
     btn.closest('.simple-table')?.parentElement ?? null,
     btn.closest('[data-ng-controller]'),
+    container,
     document.querySelector('.gtm-veditor-section'),
     document.querySelector('[data-ng-form]'),
     document.querySelector('.blg-sheet-content'),
   ].filter((el): el is Element => el != null)
 }
 
-function getTableListItemArray(): TableListItem[] | null {
+function getTableListItemArray(container: HTMLElement, btn: HTMLElement): TableListItem[] | null {
   if (!window.angular) return null
 
-  // Strategy 1: DOM scope() — works when Angular debug info is enabled
-  for (const el of tableScopeCandidates()) {
+  const domRowCount = rowsIn(container).length
+
+  // Strategy 1: DOM scope() — works when Angular debug info is enabled. Several
+  // candidate elements (especially the page-wide fallbacks in tableScopeCandidates)
+  // can resolve to a *different* table's scope when a screen has more than one
+  // simple-table (e.g. the GA4 Event tag's Event Parameters / User Properties /
+  // Advanced Settings sections), and a single scope's paramMap can itself hold
+  // several listItem-shaped params (see tryExtractAllTables) — only accept a match
+  // whose length agrees with the rows actually visible for THIS table, otherwise
+  // keep trying other candidates instead of returning the first (possibly
+  // wrong/empty) hit.
+  for (const el of tableScopeCandidates(btn, container)) {
     try {
       const scope = window.angular.element(el).scope() as Record<string, unknown> | undefined
-      const found = tryExtractTable(scope)
+      const found = pickByRowCount(tryExtractAllTables(scope), domRowCount)
       if (found) return found
     } catch { /* ignore */ }
   }
 
-  // Strategy 2: $rootScope traversal — collects ALL listItem arrays, then picks
-  // the one whose length matches the visible DOM row count (disambiguates between
-  // the active editor and stale scopes from previously opened variables).
+  // Strategy 2: $rootScope traversal — collects every listItem array reachable from
+  // every scope on the page, then picks the one whose length matches THIS table's
+  // visible DOM row count (disambiguates both between several simple-tables open on
+  // the same screen, e.g. GA4 Configuration's Fields to Set / User Properties /
+  // Configuration Settings, AND between several listItem-shaped paramMap keys within
+  // one scope, e.g. GA4 Event's `sendEcommerceData` vs its real Event Parameters table).
   try {
     const inj = window.angular.element(document.body).injector()
     if (!inj) return null
@@ -1987,8 +2142,7 @@ function getTableListItemArray(): TableListItem[] | null {
 
     function collect(scope: Record<string, unknown> | null | undefined, depth: number) {
       if (!scope || depth > 80) return
-      const found = tryExtractTable(scope, 1)
-      if (found) candidates.push(found)
+      candidates.push(...tryExtractAllTables(scope, 1))
       collect(scope['$$childHead'] as Record<string, unknown> | null | undefined, depth + 1)
       collect(scope['$$nextSibling'] as Record<string, unknown> | null | undefined, depth)
     }
@@ -1997,10 +2151,10 @@ function getTableListItemArray(): TableListItem[] | null {
     if (candidates.length === 0) return null
     if (candidates.length === 1) return candidates[0]
 
-    // Count rows currently rendered in the DOM by GTM's simple-table component.
-    const domRowCount = document.querySelectorAll('.simple-table-row').length
-    const exact = candidates.filter((items) => items.length === domRowCount)
-    if (exact.length === 1) return exact[0]
+    // domRowCount (rows currently rendered in the DOM for THIS table specifically)
+    // computed above, before Strategy 1 ran. Same off-by-one-tolerant pick as Strategy 1.
+    const match = pickByRowCount(candidates, domRowCount)
+    if (match) return match
 
     // Still ambiguous — prefer the last scope found in DFS (most recently opened editor).
     return candidates[candidates.length - 1]
@@ -2009,66 +2163,78 @@ function getTableListItemArray(): TableListItem[] | null {
   }
 }
 
+/** Injects a Copia/Incolla toolbar above EVERY simple-table on the page (not just
+ *  the first) — a single GA4 Configuration/Event tag screen can show several at
+ *  once. Each toolbar is scoped to its own table via tableSectionFor(btn). */
 function injectTableCopyPasteButtons() {
-  const addRowBtn = getTableAddRowBtn()
-  if (!addRowBtn) {
-    document.getElementById('amd-table-actions')?.remove()
-    return
-  }
-  if (document.getElementById('amd-table-actions')) return
+  const addRowBtns = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-ng-click="ctrl.addRow()"]'),
+  )
 
-  const actions = document.createElement('div')
-  actions.id = 'amd-table-actions'
-
-  const copyBtn = document.createElement('button')
-  copyBtn.type = 'button'
-  copyBtn.textContent = 'Copia tabella'
-  copyBtn.title = 'Copia tutte le righe (Ctrl+C)'
-  copyBtn.addEventListener('click', () => copyTable())
-
-  const pasteBtn = document.createElement('button')
-  pasteBtn.type = 'button'
-  pasteBtn.textContent = 'Incolla'
-  pasteBtn.title = 'Incolla righe (Ctrl+V)'
-  pasteBtn.addEventListener('click', () => {
-    navigator.clipboard.readText()
-      .then((text) => pasteTable(text))
-      .catch(() => pasteTable(''))
+  // Drop toolbars whose table is gone (section removed/re-rendered by Angular).
+  document.querySelectorAll<HTMLElement>('.amd-table-actions').forEach((toolbar) => {
+    const section = toolbar.nextElementSibling
+    const stillValid = section?.querySelector('[data-ng-click="ctrl.addRow()"]') != null
+    if (!stillValid) toolbar.remove()
   })
 
-  actions.append(copyBtn, pasteBtn)
+  if (addRowBtns.length === 0) return
 
-  // Insert just before the table section that contains the add-row button
-  const tableSection =
-    addRowBtn.closest<HTMLElement>('.blg-form-input') ??
-    addRowBtn.closest<HTMLElement>('[diff-field]') ??
-    addRowBtn.parentElement
-  if (tableSection) {
+  for (const addRowBtn of addRowBtns) {
+    const tableSection = tableSectionFor(addRowBtn)
+    if (!tableSection) continue
+    if (tableSection.previousElementSibling?.classList.contains('amd-table-actions')) continue
+
+    const actions = document.createElement('div')
+    actions.className = 'amd-table-actions'
+
+    const copyBtn = document.createElement('button')
+    copyBtn.type = 'button'
+    copyBtn.textContent = 'Copia tabella'
+    copyBtn.title = 'Copia tutte le righe (Ctrl+C)'
+    copyBtn.addEventListener('click', () => copyTable(tableSection, addRowBtn))
+
+    const pasteBtn = document.createElement('button')
+    pasteBtn.type = 'button'
+    pasteBtn.textContent = 'Incolla'
+    pasteBtn.title = 'Incolla righe (Ctrl+V)'
+    pasteBtn.addEventListener('click', () => {
+      navigator.clipboard.readText()
+        .then((text) => pasteTable(tableSection, addRowBtn, text))
+        .catch(() => pasteTable(tableSection, addRowBtn, ''))
+    })
+
+    actions.append(copyBtn, pasteBtn)
     tableSection.insertAdjacentElement('beforebegin', actions)
-  } else {
-    addRowBtn.insertAdjacentElement('beforebegin', actions)
   }
 
-  // Keyboard shortcuts — set up once per page-world session
+  // Keyboard shortcuts — only when exactly one table is on screen (with several,
+  // which one Ctrl+C/Ctrl+V should target is ambiguous; use the per-table buttons).
+  // Bound once per page-world session; re-resolves the table fresh on every
+  // keypress so it stays correct as the user navigates between editors.
   if (!window.__amdTableKbBound) {
     window.__amdTableKbBound = true
     document.addEventListener('keydown', (e) => {
-      if (!getTableAddRowBtn()) return
+      const btns = document.querySelectorAll<HTMLElement>('[data-ng-click="ctrl.addRow()"]')
+      if (btns.length !== 1) return
+      const btn = btns[0]
+      const container = tableSectionFor(btn)
+      if (!container) return
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c') { e.preventDefault(); copyTable() }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') { e.preventDefault(); copyTable(container, btn) }
       else if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
         e.preventDefault()
         navigator.clipboard.readText()
-          .then((text) => pasteTable(text))
-          .catch(() => pasteTable(''))
+          .then((text) => pasteTable(container, btn, text))
+          .catch(() => pasteTable(container, btn, ''))
       }
     }, true)
   }
 }
 
-function copyTable() {
-  const items = getTableListItemArray()
+function copyTable(container: HTMLElement, btn: HTMLElement) {
+  const items = getTableListItemArray(container, btn)
   if (!items) { showToast('Tabella non trovata'); return }
   copiedTableRows = JSON.parse(JSON.stringify(items)) as unknown[]
   // Write TSV to system clipboard so paste works across tabs and Chrome profiles
@@ -2077,23 +2243,22 @@ function copyTable() {
   showToast(`${items.length} rig${items.length === 1 ? 'a' : 'he'} copiata`)
 }
 
-function pasteTable(clipboardText: string) {
+function pasteTable(container: HTMLElement, btn: HTMLElement, clipboardText: string) {
   const hasCopied = copiedTableRows.length > 0
   const hasText = clipboardText.trim() !== ''
   if (!hasCopied && !hasText) { showToast('Nessun dato da incollare'); return }
-  if (!getTableAddRowBtn()) { showToast('Editor tabella non trovato'); return }
 
   // Use DOM row count (not items.length) to decide whether to show the modal —
   // more reliable since it reflects what's actually visible.
-  const existingDomRows = document.querySelectorAll('.simple-table-row').length
+  const existingDomRows = rowsIn(container).length
 
   const doInsert = (action: 'replace' | 'append') => {
-    if (action === 'replace') clickDeleteAllRows()
+    if (action === 'replace') clickDeleteAllRows(container)
 
     if (hasCopied) {
       const fresh = JSON.parse(JSON.stringify(copiedTableRows)) as TableListItem[]
       copiedTableRows = []
-      pasteRowsByClick(fresh.map((r) => [r.mapValue[0]?.string ?? '', r.mapValue[1]?.string ?? '']))
+      pasteRowsByClick(container, btn, fresh.map((r) => [r.mapValue[0]?.string ?? '', r.mapValue[1]?.string ?? '']))
       showToast(`${fresh.length} rig${fresh.length === 1 ? 'a' : 'he'} incollata`)
     } else {
       const rowsData: Array<[string, string]> = []
@@ -2102,7 +2267,7 @@ function pasteTable(clipboardText: string) {
         const key = rawKey.trim()
         if (key) rowsData.push([key, rawVal.trim()])
       }
-      pasteRowsByClick(rowsData)
+      pasteRowsByClick(container, btn, rowsData)
       showToast(`${rowsData.length} rig${rowsData.length === 1 ? 'a' : 'he'} incollata`)
     }
   }
@@ -2202,6 +2367,199 @@ function parseDataLayerPaths(obj: unknown, prefix = ''): string[] {
     }
   }
   return paths
+}
+
+// Keys to skip from sGTM event model (internal/system fields)
+const EDV_SKIP_RE = /^(x-ga-|x-sst-|gtm[_.]|_ga)/
+
+function parseEventDataKeys(obj: Record<string, unknown>): string[] {
+  return Object.keys(obj)
+    .filter(k => !EDV_SKIP_RE.test(k))
+    .sort()
+}
+
+// GA4 Measurement Protocol params that carry no event-model semantics
+const MP_SKIP = new Set([
+  'v', 't', 'tid', 'cid', '_p', 'dl', 'ul', 'sr', 'vp', 'dr',
+  '_fv', '_nsi', '_ss', '_dbg', 'tfd', '_z', 'gtm', 'gaz', '_gaz',
+  'richsstsse', 'uaa', 'uab', 'uafvl', 'uam', 'uap', 'uapv',
+])
+
+/**
+ * Parses a GA4 Measurement Protocol query string (or full URL) into a flat
+ * event-model object equivalent to what the sGTM GA4 client produces.
+ * ep.X  → X  (event params)
+ * up.X  → X  (user properties — treated same as event params for variable creation)
+ * en    → event_name
+ * it.N.X → items[N][X]
+ */
+function parseGa4MpQueryString(raw: string): Record<string, unknown> {
+  // Accept a full URL: extract just the query string
+  let qs = raw
+  try {
+    const url = new URL(raw)
+    qs = url.search
+  } catch { /* not a full URL — use raw as-is */ }
+  if (qs.startsWith('?')) qs = qs.slice(1)
+
+  const params = new URLSearchParams(qs)
+  const result: Record<string, unknown> = {}
+  const items: Record<string, Record<string, unknown>> = {}
+
+  for (const [k, v] of params.entries()) {
+    if (MP_SKIP.has(k) || k.startsWith('_')) continue
+    if (k === 'en') {
+      result['event_name'] = v
+    } else if (k.startsWith('ep.')) {
+      result[k.slice(3)] = v
+    } else if (k.startsWith('up.')) {
+      result[k.slice(3)] = v
+    } else if (k.startsWith('it.')) {
+      const parts = k.split('.')
+      if (parts.length >= 3) {
+        const idx = parts[1]
+        const field = parts.slice(2).join('.')
+        if (!items[idx]) items[idx] = {}
+        ;(items[idx] as Record<string, unknown>)[field] = v
+      }
+    } else if (!k.startsWith('x-') && !EDV_SKIP_RE.test(k)) {
+      result[k] = v
+    }
+  }
+
+  const idxs = Object.keys(items)
+  if (idxs.length > 0) {
+    const max = Math.max(...idxs.map(Number))
+    result['items'] = Array.from({ length: max + 1 }, (_, i) => items[String(i)] ?? {})
+  }
+
+  return result
+}
+
+async function createEventDataVariables(
+  entries: Array<{ key: string; name: string }>,
+): Promise<{ ok: number; fail: number; skipped: number }> {
+  let ok = 0, fail = 0, skipped = 0
+  try {
+    const inj = window.angular?.element(document.body).injector()
+    if (!inj) return { ok: 0, fail: entries.length, skipped: 0 }
+
+    type EdvSvc = {
+      get: (key: unknown) => Promise<{ data: Record<string, unknown> }>
+      create: (ctx: unknown, p: { data: unknown }) => Promise<unknown>
+      getList?: (ctx: unknown) => { $$state?: { value?: unknown[] } }
+    }
+    let svc: EdvSvc | null = null
+    for (const n of ['serverVariableService', 'variableService']) {
+      try {
+        const s = inj.get<EdvSvc>(n)
+        if (s && typeof s.create === 'function') { svc = s; break }
+      } catch { /* try next */ }
+    }
+    if (!svc) return { ok: 0, fail: entries.length, skipped: 0 }
+
+    let context: unknown
+    try { context = inj.get<{ getContext?: () => unknown }>('appStateService')?.getContext?.() } catch { /* ignore */ }
+
+    const existingNames = new Set<string>()
+    let templateKey: unknown = null
+    let templateParamKey = 'key'  // will be updated from the fetched template
+    const list = svc.getList?.(context)?.$$state?.value ?? []
+    for (const e of list) {
+      const entry = ((e as Record<string, unknown>)['variable'] ?? e) as Record<string, unknown>
+      const d = entry['data'] as Record<string, unknown> | undefined
+      const n = d?.['name']
+      if (typeof n === 'string') existingNames.add(n)
+      // sGTM Event Data variable type is integer 41 (confirmed from real container)
+      const t = d?.['type']
+      if ((t === 41 || t === 'ewd' || t === 'event_data') && templateKey == null) templateKey = entry['key']
+    }
+
+    // Shell fallback: first variable of any type if no EDV template found
+    let shellKey: unknown = null
+    for (const e of list) {
+      const entry = ((e as Record<string, unknown>)['variable'] ?? e) as Record<string, unknown>
+      if (entry['key'] != null) { shellKey = entry['key']; break }
+    }
+
+    let templateData: Record<string, unknown> | null = null
+    const fetchKey = templateKey ?? shellKey
+
+    if (fetchKey != null) {
+      try {
+        const fetched = await svc.get(fetchKey)
+        templateData = fetched.data
+        if (templateKey != null) {
+          // EDV template found: detect the param key used to store the event data key name
+          const params = templateData['parameter'] as Array<Record<string, unknown>> | undefined
+          if (params) {
+            const pk = params.find(p => ['key', 'varName', 'name', 'keyName'].includes(String(p['key'])))
+            if (pk) templateParamKey = String(pk['key'])
+          }
+        } else {
+          // Non-EDV shell: strip type-specific fields before use
+          delete templateData['variableId']
+          delete templateData['fingerprint']
+          delete templateData['type']
+          delete templateData['vendorTemplate']
+          delete templateData['formatValue']
+          delete templateData['parameter']
+          // sGTM-specific fields that don't belong on variables
+          delete templateData['positiveConditionId']
+          delete templateData['negativeConditionId']
+          delete templateData['positiveTriggerId']
+          delete templateData['negativeTriggerId']
+          delete templateData['normalization']
+        }
+      } catch (e) {
+        console.warn('[LayerLens] createEventDataVariables: could not fetch template', e)
+      }
+    }
+
+    for (const entry of entries) {
+      if (existingNames.has(entry.name)) { skipped++; continue }
+      try {
+        let finalName = entry.name
+        while (existingNames.has(finalName)) finalName += ' - Copy'
+
+        let varData: Record<string, unknown>
+        if (templateData != null) {
+          varData = JSON.parse(JSON.stringify(templateData)) as Record<string, unknown>
+          varData['name'] = finalName
+          if (templateKey != null) {
+            // Exact EDV template: update the param that stores the event data key name
+            const params = varData['parameter'] as Array<Record<string, unknown>> | undefined
+            const keyParam = params?.find(p => String(p['key']) === templateParamKey)
+              ?? params?.find(p => ['key', 'varName', 'name', 'keyName'].includes(String(p['key'])))
+            if (keyParam) keyParam['value'] = entry.key
+            else if (Array.isArray(params)) params.push({ key: templateParamKey, type: 'TEMPLATE', value: entry.key })
+          } else {
+            // Non-EDV shell: set type 41 (confirmed sGTM EDV type) and parameter from scratch
+            varData['type'] = 41
+            varData['parameter'] = [{ key: templateParamKey, type: 'TEMPLATE', value: entry.key }]
+          }
+        } else {
+          varData = {
+            name: finalName,
+            type: 41,
+            parameter: [{ key: templateParamKey, type: 'TEMPLATE', value: entry.key }],
+          }
+        }
+
+        await svc.create(context, { data: varData })
+        existingNames.add(finalName)
+        ok++
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : JSON.stringify(err)
+        console.warn('[LayerLens] createEventDataVariables: failed', entry.name, msg, err)
+        fail++
+      }
+    }
+  } catch (err) {
+    console.warn('[LayerLens] createEventDataVariables: error', err)
+    return { ok, fail: fail + (entries.length - ok - fail), skipped: 0 }
+  }
+  return { ok, fail, skipped }
 }
 
 async function createDlvVariables(
@@ -2926,6 +3284,167 @@ function showDlvFromPushModal() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+function showEventDataWizardModal() {
+  document.getElementById('amd-edv-modal')?.remove()
+
+  const overlay = document.createElement('div')
+  overlay.className = 'amd-modal-overlay'
+  overlay.id = 'amd-edv-modal'
+
+  const panel = document.createElement('div')
+  panel.className = 'amd-modal'
+  panel.style.cssText = 'width:min(640px,94vw);max-height:90vh;display:flex;flex-direction:column;'
+
+  // ── Header ───────────────────────────────────────────────────────────────────
+  const head = document.createElement('div')
+  head.className = 'amd-modal-head'
+  const titleEl = document.createElement('h3')
+  titleEl.textContent = 'Da evento GA4 server'
+  const closeBtn = document.createElement('button')
+  closeBtn.type = 'button'; closeBtn.className = 'amd-modal-close'; closeBtn.title = 'Chiudi'; closeBtn.textContent = '×'
+  head.append(titleEl, closeBtn)
+
+  // ── Description ──────────────────────────────────────────────────────────────
+  const descEl = document.createElement('p')
+  descEl.className = 'amd-dlv-note'
+  descEl.style.cssText = 'margin:0 0 8px;padding:0;font-style:normal;'
+  descEl.textContent = 'Incolla il JSON dell\'event model oppure la query string della request MP in arrivo (da Tag Assistant → Incoming HTTP Request, copia il body o l\'URL). Verrà creata una variabile Event Data per ogni campo selezionato.'
+
+  // ── Textarea ─────────────────────────────────────────────────────────────────
+  const textareaWrap = document.createElement('div')
+  textareaWrap.style.paddingBottom = '10px'
+  const textarea = document.createElement('textarea')
+  textarea.className = 'amd-dlv-textarea'
+  textarea.placeholder = 'JSON: { "event_name": "purchase", "currency": "EUR", "value": 99.99 }\n\noppure query string MP:\nv=2&en=purchase&ep.currency=EUR&ep.value=99.99&ep.transaction_id=TXN123\n\noppure URL completo:\nhttps://example.com/g/collect?v=2&en=purchase&ep.currency=EUR'
+  const errorEl = document.createElement('div')
+  errorEl.className = 'amd-dlv-error'
+  textareaWrap.append(textarea, errorEl)
+
+  // ── Key list (scrollable) ─────────────────────────────────────────────────────
+  const listWrap = document.createElement('div')
+  listWrap.style.cssText = 'flex:1;overflow-y:auto;padding:2px 0 6px;'
+
+  const listHead = document.createElement('div')
+  listHead.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;'
+  const listLabel = document.createElement('div')
+  listLabel.className = 'amd-dlv-sublabel'; listLabel.style.marginBottom = '0'; listLabel.textContent = 'Campi evento:'
+  const selectAllBtn = document.createElement('button')
+  selectAllBtn.type = 'button'; selectAllBtn.className = 'amd-dlv-selectall'; selectAllBtn.textContent = 'Deseleziona tutti'
+  listHead.append(listLabel, selectAllBtn)
+
+  const listEl = document.createElement('div')
+  listEl.className = 'amd-dlv-list'
+  const emptyEl = document.createElement('div')
+  emptyEl.className = 'amd-dlv-empty'; emptyEl.textContent = 'Incolla un evento JSON per visualizzare i campi.'
+  listEl.appendChild(emptyEl)
+  listWrap.append(listHead, listEl)
+
+  // ── Actions ───────────────────────────────────────────────────────────────────
+  const actionsEl = document.createElement('div'); actionsEl.className = 'amd-modal-actions'
+  const statusEl = document.createElement('span'); statusEl.className = 'amd-modal-msg'
+  const createBtn = document.createElement('button')
+  createBtn.type = 'button'; createBtn.className = 'amd-modal-save'; createBtn.textContent = 'Crea variabili'; createBtn.disabled = true
+  actionsEl.append(statusEl, createBtn)
+
+  panel.append(head, descEl, textareaWrap, listWrap, actionsEl)
+  overlay.appendChild(panel)
+  document.body.appendChild(overlay)
+
+  const close = () => overlay.remove()
+  closeBtn.addEventListener('click', close)
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
+
+  type EdvEntry = { key: string; nameInput: HTMLInputElement; checkbox: HTMLInputElement }
+  let entries: EdvEntry[] = []
+  let allSelected = true
+
+  const updateBtn = () => {
+    createBtn.disabled = entries.filter(e => e.checkbox.checked && e.nameInput.value.trim()).length === 0
+  }
+
+  const renderKeys = (keys: string[]) => {
+    listEl.innerHTML = ''; entries = []; allSelected = true
+    selectAllBtn.textContent = 'Deseleziona tutti'
+    if (keys.length === 0) {
+      const msg = document.createElement('div'); msg.className = 'amd-dlv-empty'; msg.textContent = 'Nessun campo trovato.'
+      listEl.appendChild(msg); updateBtn(); return
+    }
+    for (const key of keys) {
+      const item = document.createElement('div'); item.className = 'amd-dlv-item'
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true
+      cb.addEventListener('change', updateBtn)
+      const code = document.createElement('code'); code.textContent = key
+      const ni = document.createElement('input'); ni.type = 'text'; ni.value = 'ed - ' + key
+      item.append(cb, code, ni); listEl.appendChild(item)
+      entries.push({ key, nameInput: ni, checkbox: cb })
+    }
+    updateBtn()
+  }
+
+  selectAllBtn.addEventListener('click', () => {
+    allSelected = !allSelected
+    entries.forEach(e => { e.checkbox.checked = allSelected })
+    selectAllBtn.textContent = allSelected ? 'Deseleziona tutti' : 'Seleziona tutti'
+    updateBtn()
+  })
+
+  // ── JSON parse ────────────────────────────────────────────────────────────────
+  let debounce: ReturnType<typeof setTimeout> | null = null
+  textarea.addEventListener('input', () => {
+    if (debounce) clearTimeout(debounce)
+    debounce = setTimeout(() => {
+      const raw = textarea.value.trim()
+      errorEl.textContent = ''
+      if (!raw) {
+        listEl.innerHTML = ''; listEl.appendChild(emptyEl); entries = []; updateBtn(); return
+      }
+      try {
+        let obj: Record<string, unknown>
+        if (raw.startsWith('{')) {
+          // JSON mode
+          const parsed = JSON.parse(raw) as Record<string, unknown>
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not an object')
+          obj = parsed
+        } else {
+          // GA4 Measurement Protocol query string or full URL
+          obj = parseGa4MpQueryString(raw)
+          if (Object.keys(obj).length === 0) throw new Error('empty')
+        }
+        renderKeys(parseEventDataKeys(obj))
+      } catch {
+        errorEl.textContent = 'Formato non riconosciuto — incolla un JSON oppure una query string MP (v=2&en=...&ep.X=...).'
+        listEl.innerHTML = ''; entries = []; updateBtn()
+      }
+    }, 280)
+  })
+
+  // ── Create ────────────────────────────────────────────────────────────────────
+  createBtn.addEventListener('click', () => {
+    createBtn.disabled = true; statusEl.textContent = ''; statusEl.style.color = '#137333'
+    const toCreate = entries.filter(e => e.checkbox.checked && e.nameInput.value.trim())
+    void (async () => {
+      try {
+        const { ok, fail, skipped } = await createEventDataVariables(
+          toCreate.map(e => ({ key: e.key, name: e.nameInput.value.trim() }))
+        )
+        if (ok === 0 && fail > 0) throw new Error('Creazione fallita — verifica la console per dettagli.')
+        const parts: string[] = []
+        if (ok > 0) parts.push(`${ok} variabl${ok === 1 ? 'e' : 'i'} create`)
+        if (skipped > 0) parts.push(`${skipped} già esistenti`)
+        if (fail > 0) parts.push(`${fail} fallite`)
+        statusEl.textContent = parts.join(', ') || 'Nessuna variabile da creare'
+        setTimeout(close, 1800)
+      } catch (err) {
+        statusEl.style.color = '#c5221f'
+        statusEl.textContent = err instanceof Error ? err.message : 'Errore durante la creazione'
+        createBtn.disabled = false
+      }
+    })()
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function showToast(msg: string) {
   document.querySelector('.amd-toast')?.remove()
   const toast = document.createElement('div')
@@ -2941,7 +3460,7 @@ let scheduled = false
 const observer = new MutationObserver((mutations) => {
   const ours = mutations.every((m) => {
     const t = m.target as HTMLElement
-    return t.closest?.(`#${TOOLBAR_ID}, #amd-label-editor, #andromeda-filters-style, #amd-table-actions, .amd-table-modal-overlay, .amd-toast, #amd-dlv-modal`)
+    return t.closest?.(`#${TOOLBAR_ID}, #amd-label-editor, #andromeda-filters-style, .amd-table-actions, .amd-table-modal-overlay, .amd-toast, #amd-dlv-modal, #amd-edv-modal`)
   })
   if (ours || scheduled) return
   scheduled = true

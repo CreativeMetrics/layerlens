@@ -15,14 +15,14 @@ import type { GtmElementData, GtmElementScope, GtmListService, GtmRowScope } fro
 // Web containers use the first; Server Side containers may expose the element
 // under a different name. We probe each candidate until we find one that
 // returns a valid service from the injector.
-const SERVICE_CANDIDATES: Record<Exclude<PageType, ''>, readonly string[]> = {
+const SERVICE_CANDIDATES: Record<Exclude<PageType, '' | 'FOLDERS'>, readonly string[]> = {
   TAGS:      ['tagService',      'serverTagService',      'sTagService'],
   TRIGGERS:  ['triggerService',  'serverTriggerService'],
   VARIABLES: ['variableService', 'serverVariableService'],
   CLIENTS:   ['clientService',   'serverClientService',   'sClientService'],
 }
 
-const SCOPE_KEY: Record<Exclude<PageType, ''>, keyof GtmRowScope> = {
+const SCOPE_KEY: Record<Exclude<PageType, '' | 'FOLDERS'>, keyof GtmRowScope> = {
   TAGS:      'tag',
   TRIGGERS:  'trigger',
   VARIABLES: 'variable',
@@ -112,7 +112,7 @@ function injector() {
 /** Returns the first Angular service that looks like a valid GTM list service,
  *  trying each candidate name in order. Logs a debug hint when nothing works so
  *  developers can identify the correct name in an unfamiliar container type. */
-function service(page: Exclude<PageType, ''>): GtmListService | null {
+function service(page: Exclude<PageType, '' | 'FOLDERS'>): GtmListService | null {
   const inj = injector()
   if (!inj) return null
   for (const name of SERVICE_CANDIDATES[page]) {
@@ -125,7 +125,7 @@ function service(page: Exclude<PageType, ''>): GtmListService | null {
       // service not registered under this name; try next
     }
   }
-  console.debug(
+  console.log(
     `[Andromeda] service not found for page=${page}. Tried: ${SERVICE_CANDIDATES[page].join(', ')}. ` +
     `Use window.angular?.element(document.body).injector() in the console to enumerate available services.`,
   )
@@ -133,7 +133,7 @@ function service(page: Exclude<PageType, ''>): GtmListService | null {
 }
 
 /** Reads the live list of elements with their REAL type. Returns [] on any failure. */
-export function getElements(page: Exclude<PageType, ''>): GtmElement[] {
+export function getElements(page: Exclude<PageType, '' | 'FOLDERS'>): GtmElement[] {
   try {
     const svc = service(page)
     if (!svc) return []
@@ -164,7 +164,7 @@ export function getElements(page: Exclude<PageType, ''>): GtmElement[] {
 }
 
 /** Distinct types present in the current list, with counts. Powers the type filter UI. */
-export function getTypesPresent(page: Exclude<PageType, ''>) {
+export function getTypesPresent(page: Exclude<PageType, '' | 'FOLDERS'>) {
   const counts = new Map<string, { type: string; displayName: string; count: number }>()
   for (const eln of getElements(page)) {
     const entry = counts.get(eln.type) ?? { type: eln.type, displayName: eln.displayName, count: 0 }
@@ -200,6 +200,8 @@ export interface GtmRow {
   publicId?: string
   /** Whether the element is currently paused (tags only). */
   paused?: boolean
+  /** GTM folder ID this element belongs to; '' if not in any folder. */
+  parentFolderId: string
 }
 
 // Proven anchors (from the original, working extension): the list lives under
@@ -230,7 +232,7 @@ function rowName(node: HTMLElement): string {
   return (clone.textContent ?? '').trim()
 }
 
-export function getRowElements(page: Exclude<PageType, ''>): GtmRow[] {
+export function getRowElements(page: Exclude<PageType, '' | 'FOLDERS'>): GtmRow[] {
   try {
     const scopeKey = SCOPE_KEY[page]
     // Variables have TWO tables: built-in (variable-list-built-in) and the
@@ -305,6 +307,9 @@ export function getRowElements(page: Exclude<PageType, ''>): GtmRow[] {
         rawType: data?.type == null ? '' : String(data.type),
         publicId: publicId ?? '',
         paused: data?.paused === true,
+        // GTM stores 0 (number) for "no folder" and the numeric folder ID otherwise.
+        // Normalise: 0 / falsy → '' (no folder), anything else → string ID.
+        parentFolderId: data?.parentFolderId ? String(data.parentFolderId) : '',
       }
     })
     // Drop rows whose data isn't loaded yet (avoids a transient "Sconosciuto"
@@ -353,7 +358,7 @@ export function hasBuiltInVariables(): boolean {
  *  mode) — in that case, angular.element(node).scope() returns undefined because
  *  the DOM↔scope link is not stored, but the scope tree itself ($rootScope →
  *  $$childHead → $$nextSibling) always exists and is traversable. */
-function findKeyViaRootScope(page: Exclude<PageType, ''>, entityName: string): unknown {
+function findKeyViaRootScope(page: Exclude<PageType, '' | 'FOLDERS'>, entityName: string): unknown {
   if (!entityName) return undefined
   try {
     const inj = injector()
@@ -409,7 +414,7 @@ function findKeyViaRootScope(page: Exclude<PageType, ''>, entityName: string): u
  *
  *  Returns true if the copy was successfully initiated (async result may still fail). */
 export function copyRowToNew(
-  page: Exclude<PageType, ''>,
+  page: Exclude<PageType, '' | 'FOLDERS'>,
   clickedEl: Element,
   onResult?: (ok: boolean) => void,
 ): boolean {
@@ -473,7 +478,7 @@ export function copyRowToNew(
         if (!key && rowEl) {
           key = findKeyViaRootScope(page, rowName(rowEl))
           if (key != null) {
-            console.debug(
+            console.log(
               `[Andromeda QoL] copy: key resolved via $rootScope traversal for "${rowName(rowEl)}"`,
             )
           }
@@ -523,17 +528,17 @@ export function copyRowToNew(
         }
 
         // Service found but key not resolved — log for diagnostics.
-        console.debug(
+        console.log(
           `[Andromeda QoL] copy: service found for page=${page} but could not resolve key for ` +
           `"${rowEl ? rowName(rowEl) : '?'}". Falling through to menu fallback.`,
         )
       } else {
-        console.debug(
+        console.log(
           `[Andromeda QoL] copy: no service found for page=${page}. Tried: ${SERVICE_CANDIDATES[page].join(', ')}.`,
         )
       }
     } else {
-      console.debug('[Andromeda QoL] copy: window.angular not available — skipping Angular service path.')
+      console.log('[Andromeda QoL] copy: window.angular not available — skipping Angular service path.')
     }
   } catch (err) {
     console.warn('[Andromeda QoL] copy: Angular path exception', err)
@@ -556,11 +561,106 @@ export function copyRowToNew(
   return false
 }
 
+/** Delete the entity in the given row using the Angular service.
+ *  Uses the same three key-resolution strategies as copyRowToNew.
+ *  Returns true if deletion was started (result via onResult), false if no service/key found. */
+export function deleteRow(
+  page: Exclude<PageType, '' | 'FOLDERS'>,
+  clickedEl: Element,
+  onResult?: (ok: boolean) => void,
+): boolean {
+  const rowEl = (clickedEl.closest('[gtm-table-row]') ?? clickedEl.closest('tr')) as HTMLElement | null
+  if (!rowEl) { onResult?.(false); return false }
+
+  const singular = SCOPE_KEY[page]
+  try {
+    const inj = injector()
+    if (!inj) { onResult?.(false); return false }
+    const context = appContext()
+    const svc = service(page) as (GtmListService & {
+      delete: (key: unknown) => Promise<unknown>
+    }) | null
+    if (!svc || typeof svc.delete !== 'function') { onResult?.(false); return false }
+
+    let key: unknown
+
+    // Strategy 1: table scope
+    try {
+      const table =
+        document.querySelector('.gtm-container-page-content [gtm-table]:last-of-type table') ??
+        document.querySelector('.gtm-container-page-content [gtm-table] table')
+      const tableScope = table
+        ? (window.angular?.element(table).scope() as
+            | { tableCtrl?: { getItems?: () => Array<{ key?: unknown }>; items?: Array<{ key?: unknown }>; internalItems?: Array<{ key?: unknown }> } }
+            | undefined)
+        : undefined
+      const ctrl = tableScope?.tableCtrl
+      const items = ctrl?.getItems?.() ?? ctrl?.items ?? ctrl?.internalItems
+      if (items) {
+        const allRows = table ? Array.from(table.querySelectorAll('[gtm-table-row]')) : []
+        const idx = allRows.indexOf(rowEl)
+        if (idx >= 0 && items[idx]) key = (items[idx] as { key?: unknown }).key
+      }
+    } catch { /* next */ }
+
+    // Strategy 2: $rootScope traversal
+    if (!key) key = findKeyViaRootScope(page, rowName(rowEl))
+
+    // Strategy 3: service list name match
+    if (!key) {
+      const name = rowName(rowEl)
+      const list = svc.getList?.(context)?.$$state?.value ?? []
+      const match = name ? list.find((e) => {
+        const entry = ((e as unknown as GtmRowScope)[singular] ?? e) as { data?: GtmElementData }
+        return entry.data?.name === name
+      }) : undefined
+      if (match) key = ((match as unknown as GtmRowScope)[singular] as { key?: unknown } | undefined)?.key ?? (match as unknown as { key?: unknown }).key
+    }
+
+    if (!key) { onResult?.(false); return false }
+
+    void svc.delete(key)
+      .then(() => onResult?.(true))
+      .catch((err: unknown) => {
+        const e = err as Record<string, unknown> | null
+        const httpStatus = typeof e?.['status'] === 'number' ? e['status'] as number : undefined
+        if (httpStatus !== undefined && httpStatus >= 400) {
+          // Explicit HTTP error — show GTM's message.
+          const msg = (e?.['data'] as Record<string, unknown> | undefined)?.['message'] as string | undefined
+          window.alert(msg ?? 'Impossibile eliminare: l\'elemento è probabilmente utilizzato da altri elementi.')
+          onResult?.(false)
+        } else {
+          // Non-HTTP error: GTM's service post-processing throws a TypeError regardless of
+          // whether the HTTP DELETE succeeded (200) or was rejected (400, element in use).
+          // We can't distinguish the two from the error alone, so we check whether GTM
+          // actually removed the row from the DOM after its digest cycle runs.
+          setTimeout(() => {
+            if (rowEl.isConnected) {
+              // Row still in DOM → GTM did not refresh the list → deletion was rejected.
+              window.alert('Impossibile eliminare: l\'elemento è utilizzato da altri elementi in questo workspace.')
+              onResult?.(false)
+            } else {
+              // Row removed from DOM → GTM refreshed the list → deletion succeeded.
+              onResult?.(true)
+            }
+          }, 800)
+        }
+      })
+    return true
+  } catch (err) {
+    console.warn('[LayerLens] delete: exception', err)
+  }
+  onResult?.(false)
+  return false
+}
+
 // ── Native menu fallback helpers ─────────────────────────────────────────────
 
 /** Keywords used to identify the "copy/duplicate" action in GTM's menus.
  *  Covers English and Italian GTM UI languages. */
 const COPY_MENU_KEYWORDS = ['copia', 'copy', 'duplica', 'duplicate', 'clone']
+
+const DELETE_MENU_KEYWORDS = ['elimina', 'delete', 'remove', 'rimuovi']
 
 /** Simulates opening GTM's own three-dot action menu for a row and clicking the
  *  copy/duplicate option.
@@ -590,7 +690,7 @@ function copyViaActionMenu(rowEl: HTMLElement, onResult?: (ok: boolean) => void)
       rowEl.querySelector<HTMLElement>('td:last-child button')
 
     if (!menuToggle) {
-      console.debug(
+      console.log(
         '[Andromeda QoL] copyViaActionMenu: no menu toggle found in row. ' +
         'Row HTML (first 300 chars):', rowEl.outerHTML.slice(0, 300),
       )
@@ -618,7 +718,7 @@ function copyViaActionMenu(rowEl: HTMLElement, onResult?: (ok: boolean) => void)
           } else if (attempt < delays.length) {
             tryNext()
           } else {
-            console.debug('[Andromeda QoL] clickCopyItem: no copy menu item found after all retries.')
+            console.log('[Andromeda QoL] clickCopyItem: no copy menu item found after all retries.')
             onResult?.(false)
           }
         }, delay)
@@ -628,7 +728,7 @@ function copyViaActionMenu(rowEl: HTMLElement, onResult?: (ok: boolean) => void)
     tryNext()
     return true // toggle was found and clicked; result delivered via onResult
   } catch (err) {
-    console.debug('[Andromeda QoL] copyViaActionMenu error', err)
+    console.log('[Andromeda QoL] copyViaActionMenu error', err)
     return false
   }
 }
@@ -669,13 +769,156 @@ function clickCopyItem(): boolean {
   }
 }
 
+function clickDeleteItem(): boolean {
+  try {
+    const menuPanel =
+      document.querySelector<HTMLElement>('[role="menu"]:not([hidden])') ??
+      document.querySelector<HTMLElement>('.mat-menu-panel:not([hidden])') ??
+      document.querySelector<HTMLElement>('.mat-mdc-menu-panel:not([hidden])') ??
+      document.querySelector<HTMLElement>('.cdk-overlay-container [role="menu"]') ??
+      document.querySelector<HTMLElement>('.dropdown-menu:not(.ng-hide)') ??
+      document.querySelector<HTMLElement>('[data-action-menu]')
+
+    if (!menuPanel) return false
+
+    const items = Array.from(
+      menuPanel.querySelectorAll<HTMLElement>(
+        '[role="menuitem"], [role="option"], .mat-menu-item, .mat-mdc-menu-item, button, a',
+      ),
+    )
+    const deleteItem = items.find((el) => {
+      const text = (el.textContent ?? '').trim().toLowerCase()
+      return DELETE_MENU_KEYWORDS.some((kw) => text === kw || text.startsWith(kw))
+    })
+    if (!deleteItem) return false
+
+    deleteItem.click()
+    return true
+  } catch {
+    return false
+  }
+}
+
+function deleteViaScope(rowEl: HTMLElement, onResult?: (ok: boolean) => void): boolean {
+  // Directly call the Angular controller's delete method, bypassing any DOM search.
+  // We get the table scope, find tableCtrl, and call whichever delete method is present.
+  try {
+    const table =
+      document.querySelector('.gtm-container-page-content [gtm-table]:last-of-type table') ??
+      document.querySelector('.gtm-container-page-content [gtm-table] table')
+    if (!table) return false
+
+    type TableCtrl = Record<string, unknown>
+    const tableScope = window.angular?.element(table).scope() as { tableCtrl?: TableCtrl } | undefined
+    const ctrl = tableScope?.tableCtrl
+    if (!ctrl) return false
+
+    // Get the key for this row via tableCtrl.internalItems index
+    const allRows = Array.from(table.querySelectorAll('[gtm-table-row]'))
+    const idx = allRows.indexOf(rowEl)
+    const items = (ctrl['getItems'] as (() => Array<{ key?: unknown }>) | undefined)?.()
+      ?? ctrl['internalItems'] as Array<{ key?: unknown }> | undefined
+      ?? ctrl['items'] as Array<{ key?: unknown }> | undefined
+    const item = (items && idx >= 0) ? items[idx] : undefined
+
+    if (!item) return false
+
+    // Try each method name GTM might use for single-item deletion
+    const deleteMethodNames = ['deleteItem', 'delete', 'remove', 'deleteEntity', 'removeItem']
+    for (const method of deleteMethodNames) {
+      if (typeof ctrl[method] === 'function') {
+        console.log('[LayerLens] deleteViaScope: calling tableCtrl.' + method)
+        ;(ctrl[method] as (arg: unknown) => void)(item)
+        onResult?.(true)
+        return true
+      }
+    }
+
+    // Fallback: select via Angular model then call bulk delete
+    const selectMethod = ['selectItem', 'toggleItemSelection', 'select', 'toggleSelection']
+      .find(m => typeof ctrl[m] === 'function')
+    const bulkDelete = ['deleteSelected', 'deleteAll', 'bulkDelete', 'deleteChecked']
+      .find(m => typeof ctrl[m] === 'function')
+
+    if (selectMethod && bulkDelete) {
+      console.log('[LayerLens] deleteViaScope: selecting + bulk delete via tableCtrl.' + selectMethod + ' + ' + bulkDelete)
+      ;(ctrl[selectMethod] as (arg: unknown) => void)(item)
+      // Run AngularJS digest so selection bar renders, then call bulk delete
+      try { (window.angular?.element(document.body).scope() as { $apply?: () => void })?.$apply?.() } catch { /* ignore */ }
+      ;(ctrl[bulkDelete] as () => void)()
+      onResult?.(true)
+      return true
+    }
+
+    // Log available methods to help debug if nothing matched
+    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(ctrl))
+      .filter(k => typeof ctrl[k] === 'function')
+    console.log('[LayerLens] deleteViaScope: no delete method found. tableCtrl methods:', methods.join(', '))
+  } catch (err) {
+    console.warn('[LayerLens] deleteViaScope error:', err)
+  }
+  return false
+}
+
+function deleteViaActionMenu(rowEl: HTMLElement, onResult?: (ok: boolean) => void): boolean {
+  try {
+    const menuToggle =
+      rowEl.querySelector<HTMLElement>('[data-action-menu-toggle]') ??
+      rowEl.querySelector<HTMLElement>('button[aria-label*="zioni"]') ??
+      rowEl.querySelector<HTMLElement>('button[aria-label*="ction"]') ??
+      rowEl.querySelector<HTMLElement>('button[aria-haspopup="menu"]') ??
+      rowEl.querySelector<HTMLElement>('button[aria-haspopup="true"]') ??
+      rowEl.querySelector<HTMLElement>('.icon-btn-more, .more-actions') ??
+      rowEl.querySelector<HTMLElement>('[aria-label*="altro"]') ??
+      rowEl.querySelector<HTMLElement>('[aria-label*="more"]') ??
+      rowEl.querySelector<HTMLElement>('[aria-label*="option"]') ??
+      rowEl.querySelector<HTMLElement>('button.mat-icon-button:not(.qol-row-not-clickable)') ??
+      rowEl.querySelector<HTMLElement>('button.mat-mdc-icon-button:not(.qol-row-not-clickable)') ??
+      rowEl.querySelector<HTMLElement>('td:last-child button:not(.qol-row-not-clickable)')
+
+    if (!menuToggle) {
+      console.log('[LayerLens] deleteViaActionMenu: no toggle found. Row HTML:', rowEl.outerHTML.slice(0, 600))
+      return false
+    }
+    console.log('[LayerLens] deleteViaActionMenu: found toggle', menuToggle.tagName, menuToggle.className, menuToggle.getAttribute('aria-label'))
+
+    menuToggle.click()
+
+    const delays = [0, 80, 200, 350]
+    let attempt = 0
+
+    function tryNext() {
+      const delay = delays[attempt++]
+      if (delay === 0) {
+        if (clickDeleteItem()) { onResult?.(true); return }
+        tryNext()
+      } else if (attempt <= delays.length) {
+        setTimeout(() => {
+          if (clickDeleteItem()) {
+            onResult?.(true)
+          } else if (attempt < delays.length) {
+            tryNext()
+          } else {
+            onResult?.(false)
+          }
+        }, delay)
+      }
+    }
+
+    tryNext()
+    return true
+  } catch {
+    return false
+  }
+}
+
 // ── Rename helper ─────────────────────────────────────────────────────────────
 
 /** Rename a single entity (tag/trigger/variable/client) to `newName`.
  *  Uses the same three key-resolution strategies as copyRowToNew.
  *  Returns true if the operation was initiated; result comes via onResult. */
 export function renameElement(
-  page: Exclude<PageType, ''>,
+  page: Exclude<PageType, '' | 'FOLDERS'>,
   rowEl: HTMLElement,
   newName: string,
   onResult?: (ok: boolean) => void,
@@ -768,7 +1011,7 @@ export function toggleTagPause(rowEl: HTMLElement, onResult?: (ok: boolean) => v
   try {
     const inj = injector()
     if (!inj) {
-      console.debug('[Andromeda QoL] toggleTagPause: angular injector not available')
+      console.log('[Andromeda QoL] toggleTagPause: angular injector not available')
       onResult?.(false)
       return false
     }
@@ -780,7 +1023,7 @@ export function toggleTagPause(rowEl: HTMLElement, onResult?: (ok: boolean) => v
     } | null
 
     if (!svc) {
-      console.debug('[Andromeda QoL] toggleTagPause: tagService not found')
+      console.log('[Andromeda QoL] toggleTagPause: tagService not found')
       onResult?.(false)
       return false
     }
@@ -837,7 +1080,7 @@ export function toggleTagPause(rowEl: HTMLElement, onResult?: (ok: boolean) => v
     }
 
     if (!key) {
-      console.debug('[Andromeda QoL] toggleTagPause: could not resolve key for', rowName(rowEl))
+      console.log('[Andromeda QoL] toggleTagPause: could not resolve key for', rowName(rowEl))
       onResult?.(false)
       return false
     }
@@ -867,4 +1110,109 @@ export function toggleTagPause(rowEl: HTMLElement, onResult?: (ok: boolean) => v
     onResult?.(false)
     return false
   }
+}
+
+/**
+ * Returns a Map<folderId, folderName> for the current workspace.
+ *
+ * Strategy A: read from the Angular folder service (zero network, synchronous).
+ *   - Tries multiple service name candidates (GTM uses different names across
+ *     versions / container types).
+ *   - If ANY candidate service is found, its result is authoritative — an empty
+ *     list simply means the workspace has no folders. We do NOT fall through to
+ *     Strategy B in that case, which prevents repeated failed network requests.
+ *
+ * Strategy B: GTM's own same-origin Angular $http (fallback when no Angular
+ *   folder service is found). Uses GTM's internal API path so the existing
+ *   session auth is included automatically by the Angular $http interceptors.
+ *   We deliberately do NOT call tagmanager.googleapis.com directly from fetch()
+ *   because that endpoint requires an OAuth Bearer token, not session cookies,
+ *   and the token is not accessible from the page world.
+ *
+ * An empty Map returned by either strategy means "no folder data available"
+ * and gracefully suppresses badges and the folder filter section.
+ */
+/**
+ * Returns a Map<folderId, folderName> for the current workspace.
+ *
+ * GTM's `folderService.getList()` returns a $q promise that is initially
+ * *pending*.  AngularJS $q callbacks only fire inside a digest cycle, so we
+ * cannot rely solely on `.then()`.  We therefore use two parallel strategies
+ * and take whichever delivers first:
+ *
+ *   A) Poll `promise.$$state.value` every 150 ms (up to 6 s).  When Angular's
+ *      $http gets the server response it calls `$apply`, which resolves the $q
+ *      promise and populates `$$state.value`.
+ *   B) `.then()` — fires immediately if the promise is already resolved (cached
+ *      call), or after the next digest cycle otherwise.
+ *
+ * Both paths handle multiple response shapes: plain array, `{folder:[]}`,
+ * `{data:[]}`, `{items:[]}`, and scope-wrapped `{data:{folderId,name}}`.
+ */
+export async function getFolderMap(): Promise<Map<string, string>> {
+  const map = new Map<string, string>()
+
+  const extractFolders = (raw: unknown) => {
+    let entries: unknown[]
+    if (Array.isArray(raw)) {
+      entries = raw
+    } else if (raw && typeof raw === 'object') {
+      const obj = raw as Record<string, unknown>
+      const arr = obj['folder'] ?? obj['data'] ?? obj['items'] ?? obj['value']
+      entries = Array.isArray(arr) ? arr : []
+    } else {
+      return
+    }
+    for (const entry of entries) {
+      const e    = entry as Record<string, unknown>
+      const data = e['data'] as Record<string, unknown> | undefined
+      const key  = e['key']  as Record<string, unknown> | undefined
+      // folderId lives in `key` in the Angular scope model; name lives in `data`
+      const id   = String(data?.['folderId'] ?? key?.['folderId'] ?? e['folderId'] ?? '')
+      const name = String(data?.['name']     ?? e['name']         ?? '')
+      if (id && name) map.set(id, name)
+    }
+  }
+
+  try {
+    const inj = injector()
+    if (!inj) return map
+
+    let rawList: unknown = null
+    for (const svcName of ['folderService', 'containerFolderService', 'workspaceFolderService', 'foldersService']) {
+      try {
+        const s = inj.get<{ getList?: unknown }>(svcName)
+        if (s && typeof s.getList === 'function') {
+          rawList = (s.getList as (ctx: unknown) => unknown)(appContext())
+          break
+        }
+      } catch { /* not found */ }
+    }
+    if (rawList === null) return map
+
+    // Poll $$state: status 1 = resolved, status 2 = rejected.
+    // IMPORTANT: only accept status===1; a rejection sets $$state.value to the
+    // error object (e.g. a 404 response), which must NOT be passed to extractFolders.
+    const pollResult = await new Promise<unknown>((resolve) => {
+      let polls = 0
+      const check = () => {
+        const qState = (rawList as Record<string, unknown>)?.['$$state'] as Record<string, unknown> | undefined
+        const status = qState?.['status'] as number | undefined
+        if (status === 1)           { resolve(qState?.['value']); return }  // resolved ✓
+        if (status === 2)           { resolve(null);               return }  // rejected (404 etc.)
+        if (++polls >= 40)          { resolve(null);               return }  // timeout
+        setTimeout(check, 150)
+      }
+      // .then() fires in the next digest if the promise hasn't resolved yet
+      if (rawList && typeof (rawList as Record<string, unknown>)['then'] === 'function') {
+        ;(rawList as { then: (ok: (v: unknown) => void, err: () => void) => void })
+          .then((v) => resolve(v), () => resolve(null))
+      }
+      check()
+    })
+
+    extractFolders(pollResult)
+  } catch { /* Angular not available */ }
+
+  return map
 }

@@ -8,6 +8,8 @@
 // + detects which ancestor actually scrolled → no dependency on knowing the
 // container type in advance.
 
+import { GCS_LABELS, decodeGcs, type ConsentSignal } from '@/lib/consent'
+
 const ROOT_ID        = 'amd-ta-root'
 const PINNED_ID      = 'amd-ta-pinned'
 const VAR_ROOT_ID    = 'amd-ta-var-root'
@@ -62,6 +64,9 @@ const SEP_SELECTORS = [
 // Variables tab — confirmed selectors from real DOM inspection.
 // The Angular component hides itself via aria-hidden="true" / class="ng-hide".
 const VAR_TAB_SELECTOR  = 'variables-tab:not([aria-hidden="true"]):not(.ng-hide)'
+// Event Data tab — same hide pattern; component name by analogy with variables-tab.
+const EDV_TAB_SEL       = 'event-data-tab:not([aria-hidden="true"]):not(.ng-hide)'
+const EDV_ROOT_ID       = 'amd-edv-copy-root'
 const VAR_ROW_SEL       = '.gtm-debug-variable-table-row'
 const VAR_NAME_SEL      = '.gtm-debug-chip'
 const VAR_VALUE_SEL     = '.gtm-debug-variable-table-value'
@@ -381,6 +386,27 @@ function injectStyles() {
       font-size: 11px; color: #7a6f1a; flex-shrink: 0; white-space: nowrap;
       background: rgba(229,198,20,.28); padding: 2px 7px; border-radius: 10px;
     }
+
+    /* ── Event Data copy toolbar ── */
+    #${EDV_ROOT_ID} {
+      display: flex; align-items: center; gap: 7px;
+      padding: 7px 10px;
+      background: #fffdf0;
+      border-bottom: 2px solid #e5c614;
+      font: 13px/1.4 system-ui, Roboto, Arial, sans-serif;
+      position: sticky; top: 0; z-index: 50;
+    }
+    #${EDV_ROOT_ID} .amd-ta-brand { font-size: 10px; padding: 3px 7px 3px 6px; }
+    .amd-edv-copy-btn {
+      margin-left: auto;
+      display: inline-flex; align-items: center; gap: 5px;
+      background: #2c2c2a; color: #fff;
+      border: none; border-radius: 6px; padding: 4px 10px;
+      font: 11px/1.4 system-ui, sans-serif; cursor: pointer; white-space: nowrap;
+      transition: background .12s;
+    }
+    .amd-edv-copy-btn:hover { background: #444; }
+    .amd-edv-copy-btn svg { flex-shrink: 0; }
 
     /* ── Tag type coloring ── */
     .gtm-debug-card.amd-tag-colored {
@@ -822,6 +848,63 @@ function applyVarFilter(tab: HTMLElement) {
   }
 }
 
+// ── Event Data copy button ────────────────────────────────────────────────────
+
+const CLIP_SVG = `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M7 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/></svg>`
+
+function injectEventDataCopyBtn() {
+  const tab = document.querySelector<HTMLElement>(EDV_TAB_SEL)
+  if (!tab) {
+    document.getElementById(EDV_ROOT_ID)?.remove()
+    return
+  }
+  if (document.getElementById(EDV_ROOT_ID)?.isConnected) return
+  document.getElementById(EDV_ROOT_ID)?.remove()
+
+  // Event Data tab structure: event-data-tab > .event-data > .event-data__header + event-data-table
+  const eventDataDiv = tab.querySelector<HTMLElement>('.event-data')
+  if (!eventDataDiv) return
+  const header = eventDataDiv.querySelector<HTMLElement>('.event-data__header')
+  if (!header) return
+
+  const root = document.createElement('div')
+  root.id = EDV_ROOT_ID
+
+  const brand = document.createElement('div')
+  brand.className = 'amd-ta-brand'
+  brand.innerHTML = `<svg viewBox="0 0 20 20" width="12" height="12" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="#2c2c2a"/><circle cx="10" cy="10" r="5" fill="none" stroke="#e5c614" stroke-width="2"/><circle cx="12.8" cy="7.2" r="1.6" fill="#e5c614"/></svg>LayerLens`
+
+  const copyBtn = document.createElement('button')
+  copyBtn.type = 'button'
+  copyBtn.className = 'amd-edv-copy-btn'
+  copyBtn.title = 'Copia tutti i campi evento come JSON — incollalo nel wizard "Da evento server" in GTM'
+
+  const setNormal = () => { copyBtn.innerHTML = CLIP_SVG + ' Copia JSON' }
+  setNormal()
+
+  copyBtn.addEventListener('click', () => {
+    const rows = Array.from(tab.querySelectorAll<HTMLElement>(VAR_ROW_SEL))
+    // Keys are in td.gtm-debug-table-cell:first-child > pre; values are CodeMirror-rendered
+    // so we use null — the wizard only needs the key names anyway
+    const obj: Record<string, null> = {}
+    for (const row of rows) {
+      const key = row.querySelector<HTMLElement>('td.gtm-debug-table-cell:first-child pre')?.textContent?.trim()
+      if (key) obj[key] = null
+    }
+    if (Object.keys(obj).length === 0) {
+      copyBtn.textContent = 'Nessun campo'
+      setTimeout(setNormal, 1500)
+      return
+    }
+    void navigator.clipboard.writeText(JSON.stringify(obj, null, 2))
+      .then(() => { copyBtn.textContent = '✓ Copiato!'; setTimeout(setNormal, 1500) })
+      .catch(() => { copyBtn.textContent = 'Errore'; setTimeout(setNormal, 1500) })
+  })
+
+  root.append(brand, copyBtn)
+  header.after(root)
+}
+
 // ── Tag Type Coloring & Failed Tag Highlighting ──────────────────────────────
 
 const TAG_TYPE_RULES: Array<{ re: RegExp; color: string }> = [
@@ -955,28 +1038,12 @@ function formatJsonCells() {
 
 // ── Consent Mode Monitor ─────────────────────────────────────────────────────
 
-// Decodes the `gcs` (Google Consent State) parameter found in GA4 Measurement
-// Protocol requests. Format: G + one char per consent type (1=granted, 0=denied).
-// Order: ad_storage, analytics_storage, ad_user_data, ad_personalization.
-const GCS_LABELS = ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization']
-
-function decodeGcs(gcs: string): Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null {
-  const m = gcs.match(/^[Gg](\d*)$/)
-  if (!m) return null
-  const flags = m[1]
-  if (!flags.length) return null
-  return GCS_LABELS.slice(0, flags.length).map((name, i) => ({
-    name,
-    state: flags[i] === '1' ? 'ok' : flags[i] === '0' ? 'no' : 'unk',
-  }))
-}
-
 /**
  * Decodes gtm_session_consent_mode pipe-separated format used in the
  * Properties > Event Settings Variable JSON (e.g. "denied|denied|granted").
  * Order matches GCS_LABELS: ad_storage | analytics_storage | ad_user_data | ad_personalization.
  */
-function decodeConsentMode(raw: string): Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null {
+function decodeConsentMode(raw: string): ConsentSignal[] | null {
   const parts = raw.trim().split('|').filter(Boolean)
   if (!parts.length) return null
   return parts.slice(0, GCS_LABELS.length).map((val, i) => ({
@@ -985,7 +1052,7 @@ function decodeConsentMode(raw: string): Array<{ name: string; state: 'ok' | 'no
   }))
 }
 
-function makeConsentBadges(signals: Array<{ name: string; state: 'ok' | 'no' | 'unk' }>): HTMLElement {
+function makeConsentBadges(signals: ConsentSignal[]): HTMLElement {
   const wrap = document.createElement('div')
   wrap.className = 'amd-consent-badges'
   for (const s of signals) {
@@ -1026,7 +1093,7 @@ function formatConsentBadges() {
   for (const tagDetail of tagDetails) {
     if (tagDetail.dataset.amdConsentDone) continue
 
-    let signals: Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null = null
+    let signals: ConsentSignal[] | null = null
 
     // ── 0. gtm_session_consent_mode in Event Settings Variable JSON ───────
     // Visible in Properties table as part of the JSON value block.
@@ -1367,6 +1434,9 @@ function sync() {
   // Variables tab panel (independent injection point)
   injectVarSearch()
 
+  // Event Data tab copy button (sGTM)
+  injectEventDataCopyBtn()
+
   // Tag detail enhancements
   autoExpandShowMore()
   applyVariableDisplay()
@@ -1383,7 +1453,7 @@ let discovered = false
 const observer = new MutationObserver((muts) => {
   const ours = muts.every((m) => {
     const t = m.target as HTMLElement
-    return !!t.closest?.(`#${ROOT_ID}, #${PINNED_ID}, #${VAR_ROOT_ID}, #amd-ta-style, .amd-json-copy, .amd-url-fmt, .amd-gcs-val, .amd-consent-host`)
+    return !!t.closest?.(`#${ROOT_ID}, #${PINNED_ID}, #${VAR_ROOT_ID}, #${EDV_ROOT_ID}, #amd-ta-style, .amd-json-copy, .amd-url-fmt, .amd-gcs-val, .amd-consent-host`)
   })
   if (ours || scheduled) return
   scheduled = true

@@ -20,6 +20,14 @@ export type RuntimeMessage =
   | { code: 'exit_preview' }
   | { code: 'check_update'; data: null }
   | { code: 'GTM_IDENTIFIER'; data: { containerId: string } }
+  | { code: 'GET_NETWORK_LOG'; data: { tabId: number } }
+  | { code: 'DL_BG_PUSH'; data: { dataLayer: string; dataLayerName: string; ts: number; originUrl?: string } }
+  | { code: 'GET_DL_LOG'; data: { tabId: number } }
+  | { code: 'SET_DL_BG_CAPTURE'; data: { enabled: boolean } }
+  | { code: 'TCF_USER_ACTION'; data: { ts: number } }
+  | { code: 'GET_TCF_LOG'; data: { tabId: number } }
+  | { code: 'GET_CMP_COOKIE_WRITES' }
+  | { code: 'CLEAR_NETWORK_LOG'; data: { tabId: number } }
   | { action: 'block_page_change'; value: boolean; data?: unknown }
   | { action: 'qol_changes'; value: boolean; data?: unknown; version?: string }
   | { action: 'blocked_gtm_status'; gtmID: string; timeout: boolean }
@@ -33,8 +41,15 @@ export type PageMessage =
   | { code: 'START_DL_LIVE' }
   | { code: 'STOP_DL_LIVE' }
   | { code: 'LIST_GTM_ID'; data: { ids: string[]; url: string; origin: string } }
-  | { code: 'TABLE_DATALAYER'; data: { dataLayer: string; dataLayerName: string } }
-  | { code: 'DATALAYER_PUSH'; data: { dataLayer: string; dataLayerName: string } }
+  | {
+      code: 'TABLE_DATALAYER'
+      data: { dataLayer: string; dataLayerName: string; timestamps?: (number | null)[] }
+    }
+  | { code: 'DATALAYER_PUSH'; data: { dataLayer: string; dataLayerName: string; ts: number } }
+  | { code: 'DL_BG_PUSH'; data: { dataLayer: string; dataLayerName: string; ts: number; originUrl?: string } }
+  | { code: 'SET_DL_BG_CAPTURE'; data: { enabled: boolean } }
+  | { code: 'GET_DL_BG_CAPTURE_STATE' }
+  | { code: 'TCF_USER_ACTION'; data: { ts: number } }
   | { action: 'disable_qol' }
   | { action: 'blocked_gtm_status'; gtmID: string; timeout: boolean }
   | { action: 'inject_gtm_status'; injectIn: string }
