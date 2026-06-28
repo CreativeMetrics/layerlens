@@ -558,14 +558,14 @@ function injectStyleOnce() {
     #${TOOLBAR_ID} .amd-rename-active {
       background: #e5c614; border-color: #c9ad07; color: #2c2c2a; font-weight: 600;
     }
-    /* ── Lookup/RegEx table copy-paste ──────────── */
-    #amd-table-actions { display: flex; gap: 8px; padding: 6px 0 10px; }
-    #amd-table-actions button {
+    /* ── Lookup/RegEx table copy-paste (one per simple-table on the page) ── */
+    .amd-table-actions { display: flex; gap: 8px; padding: 6px 0 10px; }
+    .amd-table-actions button {
       padding: 5px 12px; border: 1px solid rgba(0,0,0,.14); border-radius: 8px;
       background: #fff; color: #3c4043; font-size: 13px; cursor: pointer;
       transition: background .12s, border-color .12s;
     }
-    #amd-table-actions button:hover { background: #faf6da; border-color: #e5c614; }
+    .amd-table-actions button:hover { background: #faf6da; border-color: #e5c614; }
     /* ── Toast ──────────────────────────────────── */
     .amd-toast {
       position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
@@ -1948,40 +1948,106 @@ function confirmRenames() {
 
 type TableListItem = { mapValue: Array<{ string: string }> }
 
-function getTableAddRowBtn(): HTMLElement | null {
-  return document.querySelector<HTMLElement>('[data-ng-click="ctrl.addRow()"]')
+/** Returns `rec.listItem` or `rec.value.listItem`, whichever is an array. */
+function listItemFrom(rec: Record<string, unknown> | undefined): TableListItem[] | null {
+  if (!rec) return null
+  if (Array.isArray(rec['listItem'])) return rec['listItem'] as TableListItem[]
+  const value = rec['value'] as Record<string, unknown> | undefined
+  if (value && Array.isArray(value['listItem'])) return value['listItem'] as TableListItem[]
+  return null
 }
 
-/** Walks ctrl.instance.paramMap.map.value.listItem and returns the live array
- *  if found. maxDepth controls how many parent scopes to try. */
-function tryExtractTable(
+/** Walks up parent scopes looking for `ctrl.instance` and collecting every listItem
+ *  array reachable from it. Two shapes are tried, since GTM uses the same simple-table
+ *  component in two different bindings:
+ *  1. Field-level (`instance` IS the LIST parameter, or wraps it via `.value`) — used
+ *     by vendor-template tag parameters like the GA4 Event tag's Event Settings and
+ *     the GA4 Configuration tag's Fields to Set / User Properties / Configuration Settings.
+ *  2. Entity-level (`instance` is the whole entity, the table is one of its named
+ *     parameters under `instance.paramMap[<key>]`) — used by Lookup/RegEx Table
+ *     variables (fixed key `"map"`) and by tags with several simple-tables on one
+ *     screen (e.g. the GA4 Event tag's Event Parameters / User Properties / Advanced
+ *     Settings), where each table lives under its own key.
+ *  IMPORTANT: every key in `paramMap` is collected, not just the first one that looks
+ *  like a list — GTM's internal Param model puts a `listItem` field on every parameter
+ *  generically (populated only when that param is actually LIST-typed, empty/`[]`
+ *  otherwise), so a boolean/string param earlier in iteration order (e.g.
+ *  `sendEcommerceData`) can "look like" an empty table and would wrongly win if this
+ *  stopped at the first match — that was silently making "Copia tabella" find the
+ *  wrong (always-empty) param on every screen with more than one named table.
+ *  Callers disambiguate among the collected results by visible DOM row count.
+ *  maxDepth controls how many parent scopes to try. */
+function tryExtractAllTables(
   scope: Record<string, unknown> | undefined,
   maxDepth = 6,
-): TableListItem[] | null {
+): TableListItem[][] {
+  const results: TableListItem[][] = []
   let s: Record<string, unknown> | undefined = scope
   for (let i = 0; i < maxDepth && s; i++) {
     try {
       const ctrl = (s['ctrl'] ?? s['$ctrl']) as Record<string, unknown> | undefined
       if (ctrl && typeof ctrl === 'object') {
         const instance = ctrl['instance'] as Record<string, unknown> | undefined
-        const paramMap = instance?.['paramMap'] as Record<string, unknown> | undefined
-        const map = paramMap?.['map'] as Record<string, unknown> | undefined
-        const value = map?.['value'] as Record<string, unknown> | undefined
-        const listItem = value?.['listItem']
-        if (Array.isArray(listItem)) return listItem as TableListItem[]
+        if (instance) {
+          const direct = listItemFrom(instance)
+          if (direct) results.push(direct)
+
+          const paramMap = instance['paramMap'] as Record<string, unknown> | undefined
+          if (paramMap && typeof paramMap === 'object') {
+            for (const param of Object.values(paramMap)) {
+              const found = listItemFrom(param as Record<string, unknown> | undefined)
+              if (found) results.push(found)
+            }
+          }
+        }
       }
     } catch { /* ignore */ }
     s = s['$parent'] as Record<string, unknown> | undefined
   }
-  return null
+  return results
+}
+
+/** Picks, among several candidate listItem arrays, the one whose length matches the
+ *  rows actually visible in the DOM for this specific table. Confirmed via debug on a
+ *  real GA4 Event tag: the vendor-template simple-table widget (`vt-st-add` button)
+ *  renders one extra "add new row" placeholder element in the DOM beyond the committed
+ *  listItem entries — a table with 5 real rows shows domRowCount=6, an empty one shows
+ *  domRowCount=1 with 0 items — so `domRowCount - 1` is just as valid a match as an
+ *  exact one. When several candidates qualify (e.g. several genuinely-empty params all
+ *  matching `domRowCount - 1 === 0`), the longest wins: spurious matches from non-LIST
+ *  params are always empty by construction, so a non-zero length is always the real table.
+ *  Returns null when there's no match at all (caller decides the fallback). */
+function pickByRowCount(lists: TableListItem[][], domRowCount: number): TableListItem[] | null {
+  const candidates = lists.filter(
+    (items) => items.length === domRowCount || items.length === domRowCount - 1,
+  )
+  if (candidates.length === 0) return null
+  return candidates.reduce((best, cur) => (cur.length > best.length ? cur : best))
+}
+
+/** The DOM section wrapping one specific table (its rows + add-row button) —
+ *  used to scope every row query/click to THAT table instead of the whole page,
+ *  since a single screen can have several simple-tables at once (e.g. the GA4
+ *  Configuration tag's "Fields to Set"/"User Properties"/"Configuration Settings",
+ *  or the GA4 Event tag's "Event Settings"). */
+function tableSectionFor(btn: HTMLElement): HTMLElement | null {
+  return (
+    btn.closest<HTMLElement>('.blg-form-input') ??
+    btn.closest<HTMLElement>('[diff-field]') ??
+    btn.parentElement
+  )
+}
+
+function rowsIn(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('.simple-table-row'))
 }
 
 /** After modifying listItem directly, trigger Angular's update cycle by clicking
  *  the DOM add-row button (which runs inside Zone.js, properly scheduling a $digest).
  *  addRow() appends one empty item — we pop it immediately so only our data remains. */
-/** Click the delete button of the last visible simple-table row. */
-function clickDeleteLastRow() {
-  const rows = document.querySelectorAll<HTMLElement>('.simple-table-row')
+/** Click the delete button of the last visible simple-table row within `container`. */
+function clickDeleteLastRow(container: HTMLElement) {
+  const rows = rowsIn(container)
   const lastRow = rows[rows.length - 1]
   if (!lastRow) return
   const btn =
@@ -1990,11 +2056,11 @@ function clickDeleteLastRow() {
   btn?.click()
 }
 
-/** Delete all existing rows by clicking their delete buttons. */
-function clickDeleteAllRows() {
+/** Delete all existing rows within `container` by clicking their delete buttons. */
+function clickDeleteAllRows(container: HTMLElement) {
   let safety = 200
   while (safety-- > 0) {
-    const rows = document.querySelectorAll<HTMLElement>('.simple-table-row')
+    const rows = rowsIn(container)
     if (rows.length === 0) break
     const lastRow = rows[rows.length - 1]
     const btn =
@@ -2008,12 +2074,10 @@ function clickDeleteAllRows() {
 /** Paste rows by clicking addRow for each entry, then reading the fresh listItem
  *  reference and writing values on the newly added row — same pattern as Andromeda's
  *  ctrl.addRow() + immediate set, but via DOM clicks to avoid the tableHelper issue. */
-function pasteRowsByClick(rowsData: Array<[string, string]>) {
-  const addRowBtn = getTableAddRowBtn()
-  if (!addRowBtn) return
+function pasteRowsByClick(container: HTMLElement, addRowBtn: HTMLElement, rowsData: Array<[string, string]>) {
   for (const [key, val] of rowsData) {
     addRowBtn.click()
-    const currentItems = getTableListItemArray()
+    const currentItems = getTableListItemArray(container, addRowBtn)
     if (!currentItems || currentItems.length === 0) break
     const last = currentItems[currentItems.length - 1]
     if (last?.mapValue?.[0] != null) last.mapValue[0].string = key
@@ -2021,41 +2085,53 @@ function pasteRowsByClick(rowsData: Array<[string, string]>) {
   }
   // Final addRow + deleteRow forces a digest that commits the last row's values
   addRowBtn.click()
-  clickDeleteLastRow()
+  clickDeleteLastRow(container)
 }
 
-/** Candidate DOM elements whose Angular scope might carry the table ctrl.
- *  Exported for diagnostic logging. */
-function tableScopeCandidates(): Element[] {
-  const btn = getTableAddRowBtn()
-  if (!btn) return []
+/** Candidate DOM elements whose Angular scope might carry the table ctrl for
+ *  this specific `btn`/`container` pair (not just "the" table on the page). */
+function tableScopeCandidates(btn: HTMLElement, container: HTMLElement): Element[] {
   return [
     btn,
     btn.parentElement,
     btn.closest('.blg-form-input'),
     btn.closest('.simple-table')?.parentElement ?? null,
     btn.closest('[data-ng-controller]'),
+    container,
     document.querySelector('.gtm-veditor-section'),
     document.querySelector('[data-ng-form]'),
     document.querySelector('.blg-sheet-content'),
   ].filter((el): el is Element => el != null)
 }
 
-function getTableListItemArray(): TableListItem[] | null {
+function getTableListItemArray(container: HTMLElement, btn: HTMLElement): TableListItem[] | null {
   if (!window.angular) return null
 
-  // Strategy 1: DOM scope() — works when Angular debug info is enabled
-  for (const el of tableScopeCandidates()) {
+  const domRowCount = rowsIn(container).length
+
+  // Strategy 1: DOM scope() — works when Angular debug info is enabled. Several
+  // candidate elements (especially the page-wide fallbacks in tableScopeCandidates)
+  // can resolve to a *different* table's scope when a screen has more than one
+  // simple-table (e.g. the GA4 Event tag's Event Parameters / User Properties /
+  // Advanced Settings sections), and a single scope's paramMap can itself hold
+  // several listItem-shaped params (see tryExtractAllTables) — only accept a match
+  // whose length agrees with the rows actually visible for THIS table, otherwise
+  // keep trying other candidates instead of returning the first (possibly
+  // wrong/empty) hit.
+  for (const el of tableScopeCandidates(btn, container)) {
     try {
       const scope = window.angular.element(el).scope() as Record<string, unknown> | undefined
-      const found = tryExtractTable(scope)
+      const found = pickByRowCount(tryExtractAllTables(scope), domRowCount)
       if (found) return found
     } catch { /* ignore */ }
   }
 
-  // Strategy 2: $rootScope traversal — collects ALL listItem arrays, then picks
-  // the one whose length matches the visible DOM row count (disambiguates between
-  // the active editor and stale scopes from previously opened variables).
+  // Strategy 2: $rootScope traversal — collects every listItem array reachable from
+  // every scope on the page, then picks the one whose length matches THIS table's
+  // visible DOM row count (disambiguates both between several simple-tables open on
+  // the same screen, e.g. GA4 Configuration's Fields to Set / User Properties /
+  // Configuration Settings, AND between several listItem-shaped paramMap keys within
+  // one scope, e.g. GA4 Event's `sendEcommerceData` vs its real Event Parameters table).
   try {
     const inj = window.angular.element(document.body).injector()
     if (!inj) return null
@@ -2066,8 +2142,7 @@ function getTableListItemArray(): TableListItem[] | null {
 
     function collect(scope: Record<string, unknown> | null | undefined, depth: number) {
       if (!scope || depth > 80) return
-      const found = tryExtractTable(scope, 1)
-      if (found) candidates.push(found)
+      candidates.push(...tryExtractAllTables(scope, 1))
       collect(scope['$$childHead'] as Record<string, unknown> | null | undefined, depth + 1)
       collect(scope['$$nextSibling'] as Record<string, unknown> | null | undefined, depth)
     }
@@ -2076,10 +2151,10 @@ function getTableListItemArray(): TableListItem[] | null {
     if (candidates.length === 0) return null
     if (candidates.length === 1) return candidates[0]
 
-    // Count rows currently rendered in the DOM by GTM's simple-table component.
-    const domRowCount = document.querySelectorAll('.simple-table-row').length
-    const exact = candidates.filter((items) => items.length === domRowCount)
-    if (exact.length === 1) return exact[0]
+    // domRowCount (rows currently rendered in the DOM for THIS table specifically)
+    // computed above, before Strategy 1 ran. Same off-by-one-tolerant pick as Strategy 1.
+    const match = pickByRowCount(candidates, domRowCount)
+    if (match) return match
 
     // Still ambiguous — prefer the last scope found in DFS (most recently opened editor).
     return candidates[candidates.length - 1]
@@ -2088,66 +2163,78 @@ function getTableListItemArray(): TableListItem[] | null {
   }
 }
 
+/** Injects a Copia/Incolla toolbar above EVERY simple-table on the page (not just
+ *  the first) — a single GA4 Configuration/Event tag screen can show several at
+ *  once. Each toolbar is scoped to its own table via tableSectionFor(btn). */
 function injectTableCopyPasteButtons() {
-  const addRowBtn = getTableAddRowBtn()
-  if (!addRowBtn) {
-    document.getElementById('amd-table-actions')?.remove()
-    return
-  }
-  if (document.getElementById('amd-table-actions')) return
+  const addRowBtns = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-ng-click="ctrl.addRow()"]'),
+  )
 
-  const actions = document.createElement('div')
-  actions.id = 'amd-table-actions'
-
-  const copyBtn = document.createElement('button')
-  copyBtn.type = 'button'
-  copyBtn.textContent = 'Copia tabella'
-  copyBtn.title = 'Copia tutte le righe (Ctrl+C)'
-  copyBtn.addEventListener('click', () => copyTable())
-
-  const pasteBtn = document.createElement('button')
-  pasteBtn.type = 'button'
-  pasteBtn.textContent = 'Incolla'
-  pasteBtn.title = 'Incolla righe (Ctrl+V)'
-  pasteBtn.addEventListener('click', () => {
-    navigator.clipboard.readText()
-      .then((text) => pasteTable(text))
-      .catch(() => pasteTable(''))
+  // Drop toolbars whose table is gone (section removed/re-rendered by Angular).
+  document.querySelectorAll<HTMLElement>('.amd-table-actions').forEach((toolbar) => {
+    const section = toolbar.nextElementSibling
+    const stillValid = section?.querySelector('[data-ng-click="ctrl.addRow()"]') != null
+    if (!stillValid) toolbar.remove()
   })
 
-  actions.append(copyBtn, pasteBtn)
+  if (addRowBtns.length === 0) return
 
-  // Insert just before the table section that contains the add-row button
-  const tableSection =
-    addRowBtn.closest<HTMLElement>('.blg-form-input') ??
-    addRowBtn.closest<HTMLElement>('[diff-field]') ??
-    addRowBtn.parentElement
-  if (tableSection) {
+  for (const addRowBtn of addRowBtns) {
+    const tableSection = tableSectionFor(addRowBtn)
+    if (!tableSection) continue
+    if (tableSection.previousElementSibling?.classList.contains('amd-table-actions')) continue
+
+    const actions = document.createElement('div')
+    actions.className = 'amd-table-actions'
+
+    const copyBtn = document.createElement('button')
+    copyBtn.type = 'button'
+    copyBtn.textContent = 'Copia tabella'
+    copyBtn.title = 'Copia tutte le righe (Ctrl+C)'
+    copyBtn.addEventListener('click', () => copyTable(tableSection, addRowBtn))
+
+    const pasteBtn = document.createElement('button')
+    pasteBtn.type = 'button'
+    pasteBtn.textContent = 'Incolla'
+    pasteBtn.title = 'Incolla righe (Ctrl+V)'
+    pasteBtn.addEventListener('click', () => {
+      navigator.clipboard.readText()
+        .then((text) => pasteTable(tableSection, addRowBtn, text))
+        .catch(() => pasteTable(tableSection, addRowBtn, ''))
+    })
+
+    actions.append(copyBtn, pasteBtn)
     tableSection.insertAdjacentElement('beforebegin', actions)
-  } else {
-    addRowBtn.insertAdjacentElement('beforebegin', actions)
   }
 
-  // Keyboard shortcuts — set up once per page-world session
+  // Keyboard shortcuts — only when exactly one table is on screen (with several,
+  // which one Ctrl+C/Ctrl+V should target is ambiguous; use the per-table buttons).
+  // Bound once per page-world session; re-resolves the table fresh on every
+  // keypress so it stays correct as the user navigates between editors.
   if (!window.__amdTableKbBound) {
     window.__amdTableKbBound = true
     document.addEventListener('keydown', (e) => {
-      if (!getTableAddRowBtn()) return
+      const btns = document.querySelectorAll<HTMLElement>('[data-ng-click="ctrl.addRow()"]')
+      if (btns.length !== 1) return
+      const btn = btns[0]
+      const container = tableSectionFor(btn)
+      if (!container) return
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c') { e.preventDefault(); copyTable() }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') { e.preventDefault(); copyTable(container, btn) }
       else if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
         e.preventDefault()
         navigator.clipboard.readText()
-          .then((text) => pasteTable(text))
-          .catch(() => pasteTable(''))
+          .then((text) => pasteTable(container, btn, text))
+          .catch(() => pasteTable(container, btn, ''))
       }
     }, true)
   }
 }
 
-function copyTable() {
-  const items = getTableListItemArray()
+function copyTable(container: HTMLElement, btn: HTMLElement) {
+  const items = getTableListItemArray(container, btn)
   if (!items) { showToast('Tabella non trovata'); return }
   copiedTableRows = JSON.parse(JSON.stringify(items)) as unknown[]
   // Write TSV to system clipboard so paste works across tabs and Chrome profiles
@@ -2156,23 +2243,22 @@ function copyTable() {
   showToast(`${items.length} rig${items.length === 1 ? 'a' : 'he'} copiata`)
 }
 
-function pasteTable(clipboardText: string) {
+function pasteTable(container: HTMLElement, btn: HTMLElement, clipboardText: string) {
   const hasCopied = copiedTableRows.length > 0
   const hasText = clipboardText.trim() !== ''
   if (!hasCopied && !hasText) { showToast('Nessun dato da incollare'); return }
-  if (!getTableAddRowBtn()) { showToast('Editor tabella non trovato'); return }
 
   // Use DOM row count (not items.length) to decide whether to show the modal —
   // more reliable since it reflects what's actually visible.
-  const existingDomRows = document.querySelectorAll('.simple-table-row').length
+  const existingDomRows = rowsIn(container).length
 
   const doInsert = (action: 'replace' | 'append') => {
-    if (action === 'replace') clickDeleteAllRows()
+    if (action === 'replace') clickDeleteAllRows(container)
 
     if (hasCopied) {
       const fresh = JSON.parse(JSON.stringify(copiedTableRows)) as TableListItem[]
       copiedTableRows = []
-      pasteRowsByClick(fresh.map((r) => [r.mapValue[0]?.string ?? '', r.mapValue[1]?.string ?? '']))
+      pasteRowsByClick(container, btn, fresh.map((r) => [r.mapValue[0]?.string ?? '', r.mapValue[1]?.string ?? '']))
       showToast(`${fresh.length} rig${fresh.length === 1 ? 'a' : 'he'} incollata`)
     } else {
       const rowsData: Array<[string, string]> = []
@@ -2181,7 +2267,7 @@ function pasteTable(clipboardText: string) {
         const key = rawKey.trim()
         if (key) rowsData.push([key, rawVal.trim()])
       }
-      pasteRowsByClick(rowsData)
+      pasteRowsByClick(container, btn, rowsData)
       showToast(`${rowsData.length} rig${rowsData.length === 1 ? 'a' : 'he'} incollata`)
     }
   }
@@ -3374,7 +3460,7 @@ let scheduled = false
 const observer = new MutationObserver((mutations) => {
   const ours = mutations.every((m) => {
     const t = m.target as HTMLElement
-    return t.closest?.(`#${TOOLBAR_ID}, #amd-label-editor, #andromeda-filters-style, #amd-table-actions, .amd-table-modal-overlay, .amd-toast, #amd-dlv-modal, #amd-edv-modal`)
+    return t.closest?.(`#${TOOLBAR_ID}, #amd-label-editor, #andromeda-filters-style, .amd-table-actions, .amd-table-modal-overlay, .amd-toast, #amd-dlv-modal, #amd-edv-modal`)
   })
   if (ours || scheduled) return
   scheduled = true

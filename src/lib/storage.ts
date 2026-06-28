@@ -27,6 +27,12 @@ export interface StorageSchema {
   ext_version: string
   /** Manual GTM injection rules configured from the popup. */
   gtm_manual_injections: GtmManualInjection[]
+  /** Opt-in: always-on background dataLayer capture (DL_BG_PUSH), used for export
+   *  accuracy. Off by default — the user decides when to turn it on. */
+  dl_bg_capture: 0 | 1
+  /** Opt-in: don't reset network/cookie capture on page navigation, so an export
+   *  can cover a multi-page pre-consent journey instead of only the last page. */
+  multi_page_capture: 0 | 1
 }
 
 export async function get<K extends keyof StorageSchema>(

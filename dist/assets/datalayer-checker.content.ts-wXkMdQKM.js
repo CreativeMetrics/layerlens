@@ -1,2 +1,0 @@
-(function(){const o="/assets/datalayer-checker.inject.ts-B1QOnbUT.js",t=document.createElement("script");t.type="module";t.src=chrome.runtime.getURL(o);t.dataset.andromeda="datalayer-checker";(document.head??document.documentElement).prepend(t);function a(e){return typeof e=="object"&&e!==null&&"code"in e&&!!e.code}chrome.runtime.onMessage.addListener(e=>{window.postMessage(e,"*")});window.addEventListener("message",e=>{if(e.source!==window)return;const n=e.data;a(n)&&chrome.runtime.sendMessage(n).catch(()=>{})});
-})()

@@ -8,6 +8,8 @@
 // + detects which ancestor actually scrolled → no dependency on knowing the
 // container type in advance.
 
+import { GCS_LABELS, decodeGcs, type ConsentSignal } from '@/lib/consent'
+
 const ROOT_ID        = 'amd-ta-root'
 const PINNED_ID      = 'amd-ta-pinned'
 const VAR_ROOT_ID    = 'amd-ta-var-root'
@@ -1036,28 +1038,12 @@ function formatJsonCells() {
 
 // ── Consent Mode Monitor ─────────────────────────────────────────────────────
 
-// Decodes the `gcs` (Google Consent State) parameter found in GA4 Measurement
-// Protocol requests. Format: G + one char per consent type (1=granted, 0=denied).
-// Order: ad_storage, analytics_storage, ad_user_data, ad_personalization.
-const GCS_LABELS = ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization']
-
-function decodeGcs(gcs: string): Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null {
-  const m = gcs.match(/^[Gg](\d*)$/)
-  if (!m) return null
-  const flags = m[1]
-  if (!flags.length) return null
-  return GCS_LABELS.slice(0, flags.length).map((name, i) => ({
-    name,
-    state: flags[i] === '1' ? 'ok' : flags[i] === '0' ? 'no' : 'unk',
-  }))
-}
-
 /**
  * Decodes gtm_session_consent_mode pipe-separated format used in the
  * Properties > Event Settings Variable JSON (e.g. "denied|denied|granted").
  * Order matches GCS_LABELS: ad_storage | analytics_storage | ad_user_data | ad_personalization.
  */
-function decodeConsentMode(raw: string): Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null {
+function decodeConsentMode(raw: string): ConsentSignal[] | null {
   const parts = raw.trim().split('|').filter(Boolean)
   if (!parts.length) return null
   return parts.slice(0, GCS_LABELS.length).map((val, i) => ({
@@ -1066,7 +1052,7 @@ function decodeConsentMode(raw: string): Array<{ name: string; state: 'ok' | 'no
   }))
 }
 
-function makeConsentBadges(signals: Array<{ name: string; state: 'ok' | 'no' | 'unk' }>): HTMLElement {
+function makeConsentBadges(signals: ConsentSignal[]): HTMLElement {
   const wrap = document.createElement('div')
   wrap.className = 'amd-consent-badges'
   for (const s of signals) {
@@ -1107,7 +1093,7 @@ function formatConsentBadges() {
   for (const tagDetail of tagDetails) {
     if (tagDetail.dataset.amdConsentDone) continue
 
-    let signals: Array<{ name: string; state: 'ok' | 'no' | 'unk' }> | null = null
+    let signals: ConsentSignal[] | null = null
 
     // ── 0. gtm_session_consent_mode in Event Settings Variable JSON ───────
     // Visible in Properties table as part of the JSON value block.

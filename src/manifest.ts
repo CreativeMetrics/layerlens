@@ -31,6 +31,7 @@ export default defineManifest({
     'webNavigation',
     'scripting',
     'webRequest',
+    'debugger',
   ],
   host_permissions: ['<all_urls>'],
 
@@ -41,9 +42,15 @@ export default defineManifest({
       matches: ['<all_urls>'],
       js: [
         'src/content/block-page-change.content.ts',
-        'src/content/datalayer-checker.content.ts',
         'src/content/qol-changes.content.ts',
       ],
+    },
+    {
+      // Runs at document_start so the push hook is installed before GTM loads,
+      // ensuring all dataLayer pushes (including GTM init) are captured.
+      matches: ['<all_urls>'],
+      run_at: 'document_start',
+      js: ['src/content/datalayer-checker.content.ts'],
     },
     {
       // Injects the Shopify pixel sandbox wrapper into every sub-frame.
